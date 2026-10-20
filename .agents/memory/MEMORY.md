@@ -1,0 +1,1 @@
+- [Dibujo Técnico A4](dibujo-tecnico-a4.md) — Diseñada para Galaxy Tab S10 FE+ con S Pen; guardar localmente, sin cuentas ni servicios de pago.

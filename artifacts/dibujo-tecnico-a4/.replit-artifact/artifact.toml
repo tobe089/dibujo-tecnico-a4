@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Dibujo Técnico A4"
+description = "Aplicación de dibujo técnico para tabletas con S Pen. Incluye papel A4 con cuadrícula milimétrica, trazos y medidas exactas en milímetros, guardado local y exportación vectorial."
+version = "1.0.0"
+id = "artifacts/dibujo-tecnico-a4"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22577
+
+[services.development]
+run = "pnpm --filter @workspace/dibujo-tecnico-a4 run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/dibujo-tecnico-a4", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/dibujo-tecnico-a4/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22577"
+BASE_PATH = "/"
