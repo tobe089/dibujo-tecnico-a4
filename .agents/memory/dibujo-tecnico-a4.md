@@ -8,3 +8,5 @@ La aplicación Dibujo Técnico A4 está pensada para una Samsung Galaxy Tab S10 
 **Why:** la persona quiere una herramienta funcional y sencilla para dibujo técnico en su tablet, sin servicios adicionales.
 
 **How to apply:** prioriza entrada con S Pen, controles táctiles y persistencia local al añadir herramientas; mantén las medidas documentales en milímetros. Mide las áreas táctiles renderizadas en el viewport de tablet: las columnas de CSS Grid pueden reducirlas aunque el estilo declare una altura mínima adecuada.
+
+**Precisión (requisito explícito de la persona):** no implementar imanes ni ajustes automáticos (cuadrícula, extremos, vértices, intersecciones), no redondear coordenadas ni ángulos para forzar coincidencias y no crear relaciones geométricas automáticas; los puntos solo se conectan por acción explícita del usuario (coordenadas escritas o edición).

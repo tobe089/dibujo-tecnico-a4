@@ -2,9 +2,9 @@
 // Comprueban coherencia geométrica en milímetros de documento; NO verifican la escala física de ninguna pantalla.
 import assert from 'node:assert/strict';
 import {
-  arcPoints, angleBetweenDeg, angleConstruction, collectSnapTargets, CURVE_TOLERANCE_MM, dirFromAngle,
+  angleInArc, arcPoints, arcToBeziers, angleBetweenDeg, angleConstruction, bezierPoint, CURVE_TOLERANCE_MM, dirFromAngle,
   distanceToPolyline, findStrokeAt, nearestOnSegment, normalizeDeg, offsetLine, pointAt, pointsInsideSheet,
-  relatedLine, segmentAngle, segmentLength, snapPoint, sweepBetween, unitVector,
+  relatedLine, segmentAngle, segmentLength, sweepBetween, unitVector,
 } from '../src/lib/geometry.js';
 
 let checks = 0;
@@ -92,7 +92,7 @@ for (const base of [0, 20, 133.3, 270]) for (const ang of [0.01, 30, 37.5, 90, 1
   for (let i = 0; i < 2; i += 1) near(Math.abs(((ends[i] - wanted[i] + 540) % 360) - 180), 0, 1e-6, 'extremos del arco = rayos');
 }
 
-// 6) Búsqueda, límites e imanes.
+// 6) Búsqueda y límites de la hoja.
 {
   const strokes = [{ id: 'a', kind: 'line', width: 0.4, points: [{ x: 10, y: 10 }, { x: 110, y: 10 }] },
     { id: 'c', kind: 'circle', width: 0.4, meta: { center: { x: 50, y: 50 }, radius: 20 }, points: arcPoints({ x: 50, y: 50 }, 20, 0, 360) }];
@@ -103,14 +103,20 @@ for (const base of [0, 20, 133.3, 270]) for (const ang of [0.01, 30, 37.5, 90, 1
   checks += 1; assert.equal(findStrokeAt({ x: 40, y: 11 }, strokes, 2, (s) => s.kind === 'circle'), null);
   near(distanceToPolyline({ x: 50, y: 50 }, strokes[1].points), 20, CURVE_TOLERANCE_MM * 1.0001, 'centro a polilínea (dentro de la tolerancia de curva)');
   checks += 1; assert.ok(pointsInsideSheet([{ x: 0, y: 0 }, { x: 210, y: 297 }])); assert.ok(!pointsInsideSheet([{ x: 210.01, y: 5 }])); assert.ok(!pointsInsideSheet([{ x: NaN, y: 5 }]));
-  const t = collectSnapTargets(strokes);
-  let s = snapPoint({ x: 109, y: 11 }, t, 3, 1); checks += 1; assert.deepEqual([s.x, s.y, s.kind], [110, 10, 'extremo']);
-  s = snapPoint({ x: 61, y: 9 }, t, 3, 1); checks += 1; assert.deepEqual([s.x, s.y, s.kind], [60, 10, 'medio']);
-  s = snapPoint({ x: 51, y: 49 }, t, 3, 1); checks += 1; assert.deepEqual([s.x, s.y, s.kind], [50, 50, 'centro']);
-  s = snapPoint({ x: 70.5, y: 49.2 }, t, 3, 1); checks += 1; assert.deepEqual([s.x, s.y, s.kind], [70, 50, 'cuadrante']);
-  s = snapPoint({ x: 150.3, y: 200.6 }, t, 3, 1); checks += 1; assert.deepEqual([s.x, s.y, s.kind], [150, 201, 'cuadricula']);
-  s = snapPoint({ x: 150.3, y: 200.6 }, t, 3, 0); checks += 1; assert.deepEqual([s.x, s.y, s.kind], [150.3, 200.6, null]);
   near(dirFromAngle(45).x, Math.SQRT1_2, 1e-15, 'dir 45°');
 }
+
+// 7) Arcos como curvas de Bézier (PDF): extremos exactos y error radial despreciable.
+for (const r of [0.3, 5, 30, 150, 500]) for (const [start, sweep] of [[0, 360], [17.3, 90], [300, 100], [45, 0.5]]) {
+  const bs = arcToBeziers(O, r, start, sweep);
+  near(bs[0].p0.x, pointAt(O, start, r).x, 1e-12, 'bezier inicio x');
+  near(bs[bs.length - 1].p3.y, pointAt(O, start + sweep, r).y, 1e-9, 'bezier fin y');
+  let maxErr = 0;
+  for (const b of bs) for (let t = 0; t <= 1; t += 1 / 64) { const p = bezierPoint(b, t); maxErr = Math.max(maxErr, Math.abs(Math.hypot(p.x - O.x, p.y - O.y) - r)); }
+  checks += 1; assert.ok(maxErr <= 1e-7 * Math.max(1, r), `error radial Bézier ${maxErr} mm (r=${r})`);
+  for (let i = 1; i < bs.length; i += 1) { near(bs[i].p0.x, bs[i - 1].p3.x, 1e-12, 'continuidad x'); near(bs[i].p0.y, bs[i - 1].p3.y, 1e-12, 'continuidad y'); }
+}
+// angleInArc: incluye extremos y cruza 0°.
+checks += 4; assert.ok(angleInArc(355, 350, 20)); assert.ok(angleInArc(10, 350, 20)); assert.ok(!angleInArc(11, 350, 20)); assert.ok(angleInArc(123, 0, 360));
 
 console.log(`Geometría OK: ${checks} comprobaciones numéricas superadas (milímetros de documento; sin medir ninguna pantalla).`);

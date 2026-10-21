@@ -3,12 +3,15 @@
 ## 1. Tecnologías del proyecto
 - Monorepo **pnpm** (workspaces), Node 24 (configurado para Replit), TypeScript 5.9.
 - App de dibujo: `artifacts/dibujo-tecnico-a4` → **React 19 + Vite 7 + Tailwind 4**, enrutado con wouter. El dibujo es un **SVG con coordenadas en milímetros** (hoja 210 × 297), guardado en `localStorage`. PDF vectorial con **pdf-lib**.
+- Código de la app: `src/drawing/` (interfaz: `DrawingApp.tsx`, `EntityEditor.tsx`, `fields.tsx`) y `src/lib/` (lógica pura, probada en Node: `geometry.js`, `document.js`, `erase.js`, `view.js`, `pointer-policy.js`, `render.js`, `pdf-export.js`).
 - Existe además `artifacts/api-server` (Express 5 + Drizzle/Postgres) y `lib/*` (cliente/zod generados). **La app de dibujo no los usa**: no hace falta servidor ni base de datos.
 
 ## 2. Ejecutar
 - **Replit**: pulsa *Run* y abre la vista previa (funciona igual que antes; Replit sigue inyectando `PORT` y `BASE_PATH`).
 - **Ordenador**: `corepack enable` · `pnpm install` · `pnpm --filter @workspace/dibujo-tecnico-a4 run dev` → http://localhost:5173 (ahora `PORT` y `BASE_PATH` tienen valor por defecto).
-- **Pruebas**: `pnpm --filter @workspace/dibujo-tecnico-a4 run test:geometry` y `... run verify:pdf`.
+- **Pruebas** (sin navegador): `pnpm --filter @workspace/dibujo-tecnico-a4 run test` → geometría, modelo de documento/migración/historial/borrador/vista/punteros y PDF.
+- **Tipos**: `pnpm run typecheck:libs && pnpm --filter @workspace/dibujo-tecnico-a4 run typecheck`.
+- **Extremo a extremo** (opcional, necesita Playwright y la app servida): `pnpm --filter @workspace/dibujo-tecnico-a4 run build`, `... run serve` y en otra terminal `E2E_URL=http://localhost:PUERTO/ pnpm --filter @workspace/dibujo-tecnico-a4 run test:e2e`.
 
 ## 3. Gratis desde la tablet
 **Opción A — seguir en Replit (sin instalar nada):** abre tu proyecto en Chrome, sustituye/crea los archivos listados en la sección 7 y pulsa *Run*. Los límites del plan gratuito de Replit (hibernación, horas) dependen de tu plan actual: compruébalos.
@@ -17,18 +20,23 @@
 1. Cuenta gratuita en github.com y un repositorio **público** (Pages gratis requiere repositorio público).
 2. Lleva el proyecto al repositorio. Lo más cómodo desde Android: en Replit, panel *Git* → conectar con GitHub → *Push*. (Subir carpetas completas desde el navegador del móvil/tablet es incómodo.)
 3. En el repositorio: *Settings → Pages → Source: GitHub Actions*.
-4. Cada *push* a `main` ejecuta `.github/workflows/deploy-pages.yml`: instala, pasa las pruebas de geometría y PDF, compila y publica en `https://TU_USUARIO.github.io/NOMBRE_REPO/`.
+4. Cada *push* a `main` ejecuta `.github/workflows/deploy-pages.yml`: instala, comprueba tipos, pasa las pruebas, compila y publica en `https://TU_USUARIO.github.io/NOMBRE_REPO/`.
 5. En Chrome: menú ⋮ → *Añadir a pantalla de inicio / Instalar*. (No hay modo sin conexión implementado.)
 Los nombres exactos de menús de Replit/GitHub pueden cambiar.
 
-## 4. Convenciones y herramientas
-- Milímetros de documento, origen arriba-izquierda. **Ángulos: 0° = derecha, 90° = arriba, sentido antihorario.** Los arcos avanzan en sentido antihorario del ángulo inicial al final.
-- **Regla**: toca inicio → toca dirección (o escribe el ángulo) → longitud exacta → *Crear*.
-- **Compás**: toca centro → radio (escrito o tomado de un toque) → circunferencia completa o arco (inicio/fin).
-- **Transportador**: toca vértice → orienta el rayo base → ángulo exacto (↺/↻) → crea rayos y arco marcador (un solo *Deshacer* los quita todos).
-- **Paralela / Perpendicular**: toca una línea recta como referencia → punto (o distancia entre paralelas; en perpendicular también «hasta la recta»).
-- **Imanes** a la cuadrícula de 1 mm y a extremos, medios, centros y cuadrantes de lo ya dibujado. «Ratón como lápiz» solo sirve para probar en PC.
-- Las curvas se guardan como polilíneas con desviación máxima de 0,002 mm respecto al arco teórico.
+## 4. Convenciones, modelo y herramientas
+- Milímetros de documento, origen arriba-izquierda. **Ángulos: 0° = derecha, 90° = arriba, sentido antihorario.**
+- **Modelo editable (formato v2)**: cada elemento es una entidad con identificador: punto, segmento (dos extremos), circunferencia (centro y radio), arco (centro, radio, ángulo inicial y barrido) o trazo libre (puntos con presión). Pantalla, PNG y PDF dibujan la geometría exacta (arcos SVG y curvas de Bézier en el PDF, error radial < 0,000001 mm).
+- **Sin imanes ni redondeos**: un toque se guarda exactamente donde se hizo; nada se ajusta a la cuadrícula ni a otros elementos y no hay relaciones automáticas. Las coincidencias exactas se consiguen escribiendo coordenadas o editando la entidad. Los campos muestran 3 decimales, pero solo sustituyen el valor guardado cuando escribes en ellos.
+- **Regla**: toca el inicio y el final (o arrastra de uno a otro): la línea une exactamente esos dos puntos. Tras el primer toque también puedes escribir longitud y ángulo. La línea creada queda editable en el panel.
+- **Compás**: toca el centro y luego un punto de la circunferencia (o arrastra): el radio es la distancia exacta. Modo arco: el segundo toque fija radio y ángulo inicial; el tercero, la dirección final (↺/↻). También por valores.
+- **Punto**: marca un punto en la posición tocada.
+- **Transportador**: vértice → rayo base (toque o valor) → ángulo exacto (↺/↻) → *Crear* (un solo *Deshacer*).
+- **Paralela / Perpendicular**: toca un segmento como referencia → punto (o distancia) → *Crear*. La nueva línea no queda ligada a la referencia.
+- **Borrador**: «Solo lo que toca» quita únicamente la parte atravesada (un segmento queda en dos, una circunferencia pasa a arco, un trazo libre se corta); «Elemento completo» quita todo lo que toques. Cada pasada se deshace con un *Deshacer*.
+- **Seleccionar**: toca un elemento para ver y editar sus medidas exactas, aplicarle el color/grosor actual o eliminarlo.
+- **Entrada**: el S Pen siempre dibuja. Con «Automático», el dedo dibuja hasta que se detecta el lápiz; después solo navega. Dos dedos siempre amplían/desplazan (anclado bajo los dedos) y cancelan lo que el primero estuviera dibujando; nada se confirma hasta levantar el dedo. Mientras el lápiz está apoyado o cerca (sobrevuelo, o hasta 0,6 s después de levantarlo) se ignoran los toques, y también los contactos muy grandes: es el rechazo de palma posible en un navegador. Ratón: botón principal dibuja; rueda desplaza; Ctrl + rueda amplía en el cursor.
+- **Datos anteriores**: un dibujo del formato v1 se convierte automáticamente al abrir la app (líneas, círculos y arcos con sus valores exactos; trazos libres como trazos libres). El original v1 no se borra.
 
 ## 5. Escala física
 Un navegador no conoce el tamaño real de la pantalla. Por eso:
@@ -38,19 +46,7 @@ Un navegador no conoce el tamaño real de la pantalla. Por eso:
 4. PDF: la página es A4 exacta (595,276 × 841,890 pt). Al imprimir elige *tamaño real / 100 %* y mide un trazo en el papel.
 
 ## 6. Qué se comprobó y qué no
-**Comprobado (en el entorno donde se preparó, sin red):**
-- Matemática de `geometry.js`: 13 895 comprobaciones numéricas (ángulos, longitudes, arcos, paralelas, perpendiculares, imanes).
-- PDF: página A4, segmento de 50 mm y circunferencia de radio 30 mm, sin imágenes raster.
-- Interfaz: 386 comprobaciones con Chromium sobre este `App.tsx`, sustituyendo por «stubs» iconos, router y react-query (no estaban disponibles). Incluye creación con cada herramienta, deshacer/rehacer, selección, exportación PNG/PDF, calibración y carga de documentos de la versión anterior.
-- Dos errores previos corregidos: el **PNG salía con el interior negro** (el rectángulo de márgenes dependía de una clase CSS que no viaja en el SVG exportado) y `<o>` en lugar de `<output>` en el rótulo del grosor.
-
-**NO comprobado:** compilación con Vite/Tailwind y dependencias reales, comprobación de tipos TypeScript completa, comportamiento del S Pen real (presión, sobrevuelo, rechazo de palma), escala física en la pantalla y en papel impreso, y el flujo de GitHub Actions (nunca se ejecutó).
-
-## 7. Archivos modificados o nuevos
-- `artifacts/dibujo-tecnico-a4/src/App.tsx` (modificado)
-- `artifacts/dibujo-tecnico-a4/src/index.css` (modificado: estilos nuevos y altura fija de la app)
-- `artifacts/dibujo-tecnico-a4/src/lib/geometry.js` y `geometry.d.ts` (nuevos)
-- `artifacts/dibujo-tecnico-a4/scripts/test-geometry.mjs` (nuevo) y `verify-a4-pdf.mjs` (ampliado)
-- `artifacts/dibujo-tecnico-a4/vite.config.ts`, `package.json`, `index.html` (cambios mínimos)
-- `.github/workflows/deploy-pages.yml` e `INSTRUCCIONES.md` (nuevos)
-- Sin cambios: `src/lib/pdf-export.js` (el PDF ya era vectorial y sirve para arcos y círculos).
+Ver el informe de cada etapa en la conversación de desarrollo. Resumen del estado actual:
+- **Comprobado en Node**: `test-geometry.mjs`, `test-document.mjs` (migración, edición, historial, borrador exacto frente a fuerza bruta, vista, política de punteros) y `verify-a4-pdf.mjs` (A4 exacto, posiciones y curvas medidas dentro del PDF).
+- **Comprobado en Chromium (escritorio, eventos simulados)**: `e2e-tools.mjs` con eventos de lápiz (`pointerType: 'pen'`) y táctiles enviados por el protocolo de depuración de Chrome.
+- **NO comprobado**: S Pen y pantalla reales de la Galaxy Tab (presión, sobrevuelo, rechazo de palma del sistema, teclado decimal de Samsung), descargas en Chrome para Android, escala física e impresión en papel, y el flujo de GitHub Actions.

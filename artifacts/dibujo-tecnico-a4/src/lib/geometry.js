@@ -79,6 +79,53 @@ export function sweepBetween(startDeg, endDeg) {
   return normalizeDeg(endDeg - startDeg);
 }
 
+/** ¿Está el ángulo `deg` dentro del arco antihorario que empieza en startDeg y barre sweepDeg? */
+export function angleInArc(deg, startDeg, sweepDeg) {
+  if (sweepDeg >= 360) return true;
+  return normalizeDeg(deg - startDeg) <= sweepDeg;
+}
+
+/** Paso angular máximo (grados) de cada curva de Bézier al convertir un arco: error radial < 1e-8·r. */
+export const BEZIER_MAX_STEP_DEG = 15;
+
+/**
+ * Arco antihorario convertido a curvas de Bézier cúbicas (coordenadas de hoja, Y hacia abajo).
+ * Devuelve [{ p0, c1, c2, p3 }]. Los extremos p0/p3 están exactamente sobre la circunferencia.
+ */
+export function arcToBeziers(center, radius, startDeg, sweepDeg, maxStepDeg = BEZIER_MAX_STEP_DEG) {
+  const sweep = Math.min(360, Math.max(0, sweepDeg));
+  const n = Math.max(1, Math.ceil(sweep / maxStepDeg));
+  const step = sweep / n;
+  const k = (4 / 3) * Math.tan((step * DEG) / 4) * radius;
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const a0 = startDeg + step * i;
+    const a1 = startDeg + step * (i + 1);
+    const p0 = pointAt(center, a0, radius);
+    const p3 = i === n - 1 && sweep === 360 ? pointAt(center, startDeg, radius) : pointAt(center, a1, radius);
+    // Derivada de c + r·(cos θ, −sin θ) respecto de θ: (−sin θ, −cos θ)
+    const t0 = { x: -Math.sin(a0 * DEG), y: -Math.cos(a0 * DEG) };
+    const t1 = { x: -Math.sin(a1 * DEG), y: -Math.cos(a1 * DEG) };
+    out.push({
+      p0,
+      c1: { x: p0.x + k * t0.x, y: p0.y + k * t0.y },
+      c2: { x: p3.x - k * t1.x, y: p3.y - k * t1.y },
+      p3,
+    });
+  }
+  return out;
+}
+
+/** Punto de una curva de Bézier cúbica en t ∈ [0, 1]. */
+export function bezierPoint(b, t) {
+  const u = 1 - t;
+  const w0 = u * u * u, w1 = 3 * u * u * t, w2 = 3 * u * t * t, w3 = t * t * t;
+  return {
+    x: w0 * b.p0.x + w1 * b.c1.x + w2 * b.c2.x + w3 * b.p3.x,
+    y: w0 * b.p0.y + w1 * b.c1.y + w2 * b.c2.y + w3 * b.p3.y,
+  };
+}
+
 // ───────────────────────── Distancias y búsqueda ─────────────────────────
 
 export function nearestOnSegment(p, a, b) {
@@ -119,56 +166,6 @@ export function pointsInsideSheet(points, eps = 1e-9) {
     (p) => Number.isFinite(p.x) && Number.isFinite(p.y) &&
       p.x >= -eps && p.x <= SHEET_W + eps && p.y >= -eps && p.y <= SHEET_H + eps,
   );
-}
-
-// ───────────────────────── Imanes (snap) ─────────────────────────
-
-/** Puntos notables de los trazos ya dibujados: extremos y medios de líneas, centros/cuadrantes de círculos. */
-export function collectSnapTargets(strokes) {
-  const targets = [];
-  for (const s of strokes) {
-    const pts = s.points;
-    if (!pts || !pts.length) continue;
-    if (s.kind === 'line' && pts.length >= 2) {
-      const a = pts[0];
-      const b = pts[pts.length - 1];
-      targets.push({ x: a.x, y: a.y, kind: 'extremo' }, { x: b.x, y: b.y, kind: 'extremo' });
-      targets.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, kind: 'medio' });
-    } else if ((s.kind === 'circle' || s.kind === 'arc') && s.meta && s.meta.center) {
-      const c = s.meta.center;
-      targets.push({ x: c.x, y: c.y, kind: 'centro' });
-      if (s.kind === 'arc') {
-        const a = pts[0];
-        const b = pts[pts.length - 1];
-        targets.push({ x: a.x, y: a.y, kind: 'extremo' }, { x: b.x, y: b.y, kind: 'extremo' });
-      } else {
-        for (const q of [0, 90, 180, 270]) {
-          const qp = pointAt(c, q, s.meta.radius);
-          targets.push({ x: qp.x, y: qp.y, kind: 'cuadrante' });
-        }
-      }
-    }
-  }
-  return targets;
-}
-
-/**
- * Imán: primero a puntos notables dentro de tolMm; si no hay, a la cuadrícula (gridStep mm, 0 = desactivado).
- * Devuelve { x, y, kind } con kind = 'extremo' | 'medio' | 'centro' | 'cuadrante' | 'cuadricula' | null.
- */
-export function snapPoint(p, targets, tolMm, gridStep) {
-  let best = null;
-  for (const t of targets) {
-    const d = Math.hypot(p.x - t.x, p.y - t.y);
-    if (d <= tolMm && (!best || d < best.d)) best = { d, t };
-  }
-  if (best) return { x: best.t.x, y: best.t.y, kind: best.t.kind };
-  if (gridStep > 0) {
-    const gx = Math.round(p.x / gridStep) * gridStep;
-    const gy = Math.round(p.y / gridStep) * gridStep;
-    if (Math.hypot(p.x - gx, p.y - gy) <= Math.max(tolMm, gridStep / 2)) return { x: gx, y: gy, kind: 'cuadricula' };
-  }
-  return { x: p.x, y: p.y, kind: null };
 }
 
 // ───────────────────────── Paralelas y perpendiculares ─────────────────────────

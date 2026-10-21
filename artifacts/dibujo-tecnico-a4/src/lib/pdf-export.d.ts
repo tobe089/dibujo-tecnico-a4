@@ -1,5 +1,4 @@
-export type PdfPoint = { x: number; y: number };
-export type PdfStroke = { points: PdfPoint[]; color: string; width: number };
-export type PdfMargins = { top: number; right: number; bottom: number; left: number };
-
-export function createA4Pdf(strokes: PdfStroke[], margins: PdfMargins): Promise<Uint8Array>;
+import type { Entity, Margins } from './document.js';
+export type PdfMargins = Margins;
+export function entityOperators(entity: Entity, pageHeight: number): unknown[];
+export function createA4Pdf(entities: Entity[], margins: Margins, options?: { grid?: boolean }): Promise<Uint8Array>;

@@ -1,0 +1,13 @@
+import type { Entity, Pt } from './document.js';
+export type AngleSet = [number, number][];
+export type EraseOptions = { mode?: 'partial' | 'whole'; newId?: () => string };
+export const MIN_PIECE_MM: number;
+export function arcSet(startDeg: number, sweepDeg: number): AngleSet;
+export function unionSets(...sets: AngleSet[]): AngleSet;
+export function intersectSets(a: AngleSet, b: AngleSet): AngleSet;
+export function complementSet(a: AngleSet): AngleSet;
+export function circleCapsuleCover(c: Pt, radius: number, p: Pt, q: Pt, r: number): AngleSet;
+export function segmentCapsuleInterval(a: Pt, b: Pt, p: Pt, q: Pt, r: number): [number, number] | null;
+export function eraseEntity(e: Entity, p: Pt, q: Pt, r: number, options?: EraseOptions): Entity[] | null;
+export function eraseWithCapsule(entities: Entity[], p: Pt, q: Pt, r: number, options?: EraseOptions): Entity[];
+export function eraseAlongPath(entities: Entity[], path: Pt[], r: number, options?: EraseOptions): Entity[];

@@ -1,0 +1,11 @@
+export type View = { scale: number; tx: number; ty: number };
+type P = { x: number; y: number };
+export const MIN_SCALE: number;
+export const MAX_SCALE: number;
+export function fitView(stageW: number, stageH: number, pad?: number): View;
+export function screenToDoc(view: View, sx: number, sy: number): P;
+export function docToScreen(view: View, x: number, y: number): P;
+export function zoomAt(view: View, ax: number, ay: number, factor: number): View;
+export function panBy(view: View, dx: number, dy: number): View;
+export function pinchView(start: { view: View; a: P; b: P }, a: P, b: P): View;
+export function viewBoxFor(view: View, w: number, h: number): { x: number; y: number; w: number; h: number };

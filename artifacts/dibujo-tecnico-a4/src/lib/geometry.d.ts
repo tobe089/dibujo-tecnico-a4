@@ -1,7 +1,4 @@
 export type GPoint = { x: number; y: number };
-export type SnapKind = 'extremo' | 'medio' | 'centro' | 'cuadrante' | 'cuadricula' | null;
-export type SnapTarget = GPoint & { kind: Exclude<SnapKind, 'cuadricula' | null> };
-export type SnapResult = GPoint & { kind: SnapKind };
 export type GStroke = {
   points: GPoint[];
   kind?: string;
@@ -24,14 +21,16 @@ export function roundTo(value: number, decimals: number): number;
 export function arcStepRad(radius: number, tol?: number): number;
 export function arcPoints(center: GPoint, radius: number, startDeg: number, sweepDeg: number, tol?: number): GPoint[];
 export function sweepBetween(startDeg: number, endDeg: number): number;
+export function angleInArc(deg: number, startDeg: number, sweepDeg: number): boolean;
+export const BEZIER_MAX_STEP_DEG: number;
+export type Bezier = { p0: GPoint; c1: GPoint; c2: GPoint; p3: GPoint };
+export function arcToBeziers(center: GPoint, radius: number, startDeg: number, sweepDeg: number, maxStepDeg?: number): Bezier[];
+export function bezierPoint(b: Bezier, t: number): GPoint;
 
 export function nearestOnSegment(p: GPoint, a: GPoint, b: GPoint): { point: GPoint; t: number; dist: number };
 export function distanceToPolyline(p: GPoint, pts: GPoint[]): number;
 export function findStrokeAt<T extends GStroke>(p: GPoint, strokes: T[], tolMm: number, filter?: (s: T) => boolean): T | null;
 export function pointsInsideSheet(points: GPoint[], eps?: number): boolean;
-
-export function collectSnapTargets(strokes: GStroke[]): SnapTarget[];
-export function snapPoint(p: GPoint, targets: SnapTarget[], tolMm: number, gridStep: number): SnapResult;
 
 export function relatedLine(args: {
   ref0: GPoint; ref1: GPoint; mode: 'parallel' | 'perpendicular'; through: GPoint;
