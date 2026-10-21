@@ -9,7 +9,8 @@
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify:pdf": "node ./scripts/verify-a4-pdf.mjs",
-    "test:geometry": "node ./scripts/test-geometry.mjs"
+    "test:geometry": "node ./scripts/test-geometry.mjs",
+    "test": "node ./scripts/test-geometry.mjs && node ./scripts/verify-a4-pdf.mjs"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",

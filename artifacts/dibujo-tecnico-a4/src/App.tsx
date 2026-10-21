@@ -90,7 +90,7 @@ function NumField({ label, value, onChange, unit, testid, min, max }: {
     <input className="number-input" type="number" inputMode="decimal" step="any" min={min} max={max} value={value} onChange={event => onChange(event.target.value)} data-testid={testid} />
   </label>;
 }
-function Seg<T extends string>({ value, options, onChange, testid }: { value: T; options: { value: T; label: string }[]; onChange: (value: T) => void; testid?: string }) {
+function Seg<T extends string>({ value, options, onChange, testid }: { value: T; options: { value: NoInfer<T>; label: string }[]; onChange: (value: NoInfer<T>) => void; testid?: string }) {
   return <div className="seg" role="group" data-testid={testid}>
     {options.map(option => <button key={option.value} type="button" className={value === option.value ? 'on' : ''} onClick={() => onChange(option.value)} data-testid={testid ? `${testid}-${option.value}` : undefined}>{option.label}</button>)}
   </div>;

@@ -29,10 +29,12 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Pruebas de geometría y de PDF
+      - name: Comprobación de tipos
         run: |
-          pnpm --filter @workspace/dibujo-tecnico-a4 run test:geometry
-          pnpm --filter @workspace/dibujo-tecnico-a4 run verify:pdf
+          pnpm run typecheck:libs
+          pnpm --filter @workspace/dibujo-tecnico-a4 run typecheck
+      - name: Pruebas de geometría, documento y PDF
+        run: pnpm --filter @workspace/dibujo-tecnico-a4 run test
       - name: Compilar
         env:
           PORT: "3000"
