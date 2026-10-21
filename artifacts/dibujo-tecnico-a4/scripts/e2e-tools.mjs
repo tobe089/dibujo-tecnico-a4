@@ -29,7 +29,7 @@ async function fresh(storage = null) {
   await page.evaluate(() => {
     window.__downs = []; window.__ups = [];
     const svg = document.querySelector('[data-testid=drawing-sheet]');
-    svg.addEventListener('pointerdown', (e) => window.__downs.push({ x: e.clientX, y: e.clientY, t: e.pointerType }), true);
+    svg.addEventListener('pointerdown', (e) => window.__downs.push({ x: e.clientX, y: e.clientY, t: e.pointerType, id: e.pointerId }), true);
     svg.addEventListener('pointerup', (e) => window.__ups.push({ x: e.clientX, y: e.clientY, t: e.pointerType }), true);
   });
 }
@@ -169,15 +169,16 @@ near(docMid1.x, docMid0.x, 1e-6, 'zoom con botón centrado (x)'); near(docMid1.y
 await page.click('[data-testid=button-fit]');
 log('zoom con botón: el centro de la pantalla no se desplaza');
 
-// ───────── 6) Dedo: dibuja sin lápiz; dos dedos pellizcan y cancelan; palma ignorada con lápiz ─────────
+// ───────── 6) Dedo: dibuja si se elige; dos dedos pellizcan y cancelan; palma ignorada con lápiz ─────────
 await fresh();
+await page.click('[data-testid=seg-finger-mode-all]');
 await page.click('[data-testid=tool-pen]');
 let p0 = await toClient(40, 40);
 await touch('touchStart', [{ x: p0.x, y: p0.y, id: 1 }]);
 for (let i = 1; i <= 10; i += 1) await touch('touchMove', [{ x: p0.x + i * 10, y: p0.y, id: 1 }]);
 await touch('touchEnd', []);
 ents = await entities();
-ok(ents.length === 1 && ents[0].type === 'polyline', 'sin lápiz detectado, el dedo dibuja');
+ok(ents.length === 1 && ents[0].type === 'polyline', "con «Dedo dibuja», el dedo dibuja");
 // Pellizco: el primer dedo empieza a dibujar y el segundo convierte el gesto en zoom.
 const vp0 = await view();
 const a0 = { x: 700, y: 400 }, b0 = { x: 900, y: 400 };
@@ -195,8 +196,9 @@ const midNow = { x: ((a0.x - 103) + (b0.x + 100)) / 2, y: a0.y + 50 };
 const anchorNow = clientToDoc(vp1, midNow);
 near(anchorNow.x, anchorDoc.x, 0.3 / vp1.scale * 10, 'el punto bajo los dedos sigue bajo los dedos (x)');
 near(anchorNow.y, anchorDoc.y, 0.3 / vp1.scale * 10, 'el punto bajo los dedos sigue bajo los dedos (y)');
-log('dedo: dibuja sin lápiz; dos dedos amplían anclados y cancelan el trazo');
+log('dedo: dibuja si se elige; dos dedos amplían anclados y cancelan el trazo');
 await page.click('[data-testid=button-fit]');
+await page.click('[data-testid=seg-finger-mode-auto]');
 
 // Lápiz con la palma apoyada encima de la hoja.
 const vq = await view();
@@ -248,6 +250,205 @@ const [png] = await Promise.all([page.waitForEvent('download'), page.click('[dat
 const buf = fs.readFileSync(await png.path());
 ok(buf.readUInt32BE(16) === 2480 && buf.readUInt32BE(20) === 3508, 'PNG 2480 × 3508');
 log('exportación PDF y PNG');
+
+
+// ───────── 9) La navegación no altera lo guardado (coordenadas en mm de hoja) ─────────
+{
+  const docA = { version: 2, margins: { top: 10, right: 10, bottom: 10, left: 10 }, color: '#244d58', width: 0.45, entities: [
+    { id: 's', type: 'segment', color: '#244d58', width: 0.45, a: { x: 12.345678901234, y: 56.789012345678 }, b: { x: 187.654321098765, y: 23.456789012345 } },
+    { id: 'c', type: 'circle', color: '#244d58', width: 0.45, c: { x: 105.000000001, y: 148.5 }, r: 33.333333333333 },
+    { id: 'a', type: 'arc', color: '#244d58', width: 0.45, c: { x: 60, y: 220 }, r: 17.77777, start: 12.3456789, sweep: 200.123456 } ] };
+  await fresh({ 'dibujo-tecnico-a4-v2': JSON.stringify(docA) });
+  await page.waitForTimeout(550); // primer guardado automático (reescribe el JSON con su orden de claves)
+  const rawBefore = await page.evaluate(() => localStorage.getItem('dibujo-tecnico-a4-v2'));
+  assert.deepEqual(JSON.parse(rawBefore).entities, docA.entities); checks += 1;
+  for (let i = 0; i < 3; i += 1) await page.click('[data-testid=button-zoom-in]');
+  await page.mouse.move(700, 400); await page.keyboard.down('Control'); await page.mouse.wheel(0, -300); await page.keyboard.up('Control');
+  await page.mouse.wheel(120, 80);
+  await touch('touchStart', [{ x: 700, y: 400, id: 1 }, { x: 800, y: 420, id: 2 }]);
+  for (let i = 1; i <= 8; i += 1) await touch('touchMove', [{ x: 700 - i * 9, y: 400 - i * 3, id: 1 }, { x: 800 + i * 9, y: 420 + i * 7, id: 2 }]);
+  await touch('touchEnd', []);
+  await touch('touchStart', [{ x: 900, y: 500, id: 3 }]); await touch('touchMove', [{ x: 840, y: 460, id: 3 }]); await touch('touchEnd', []);
+  await page.click('[data-testid=button-fit]');
+  await page.waitForTimeout(550);
+  ok(rawBefore === await page.evaluate(() => localStorage.getItem('dibujo-tecnico-a4-v2')), 'zoom, rueda, pellizco y desplazamiento no cambian ni un bit de lo guardado');
+  ok(await page.locator('[data-testid=button-undo]').isDisabled(), 'la navegación no crea pasos de deshacer');
+  log('navegación: coordenadas guardadas idénticas bit a bit');
+}
+
+// ───────── 10) G1: un toque con temblor no crea geometría; el arrastre real sí, con extremos exactos ─────────
+async function penJitter(x, y, dxPx) {
+  const p = await toClient(x, y);
+  await pen('mouseMoved', p, 0); await pen('mousePressed', p);
+  await pen('mouseMoved', { x: p.x + dxPx * 0.5, y: p.y }); await pen('mouseMoved', { x: p.x + dxPx, y: p.y });
+  await pen('mouseReleased', { x: p.x + dxPx, y: p.y }, 0); await page.waitForTimeout(30);
+}
+{
+  await fresh();
+  for (const zoomSteps of [0, 4]) {
+    await page.click('[data-testid=button-fit]');
+    for (let i = 0; i < zoomSteps; i += 1) await page.click('[data-testid=button-zoom-in]');
+    const v = await view();
+    await page.click('[data-testid=tool-ruler]');
+    for (const dx of [5, 9]) {
+      await page.click('[data-testid=tool-ruler]');
+      await penJitter(105, 148.5, dx);
+      const down = clientToDoc(v, await lastDown());
+      ok((await page.locator('[data-testid=status-ruler] b').innerText()).includes('02'), `regla: temblor de ${dx} px (zoom ${zoomSteps}) fija el inicio`);
+      ok((await page.locator('[data-testid=text-rule-start]').innerText()).includes(`${Number(down.x.toFixed(3))}`), 'el inicio es el punto de apoyo');
+      ok((await entities()).length === 0, `regla: temblor de ${dx} px no crea ninguna línea`);
+    }
+    await page.click('[data-testid=tool-compass]');
+    await penJitter(105, 148.5, 9);
+    ok((await page.locator('[data-testid=status-compass] b').innerText()).includes('02') && (await entities()).length === 0, `compás: temblor de 9 px (zoom ${zoomSteps}) fija el centro sin crear nada`);
+    await page.click('[data-testid=tool-point]');
+    await penJitter(100, 100, 9);
+    const dP = clientToDoc(v, await lastDown());
+    const pts = await entities();
+    ok(pts.length === 1 && pts[0].type === 'point' && Math.abs(pts[0].x - dP.x) < 1e-9 && Math.abs(pts[0].y - dP.y) < 1e-9, `punto: con temblor de 9 px queda exactamente en el punto de apoyo (zoom ${zoomSteps})`);
+    await page.click('[data-testid=button-undo]');
+  }
+  await page.click('[data-testid=button-fit]');
+  await page.click('[data-testid=tool-ruler]');
+  const v = await view();
+  await penJitter(60, 60, 15);
+  const a = clientToDoc(v, await lastDown());
+  const up = clientToDoc(v, await page.evaluate(() => window.__ups.at(-1)));
+  const line = (await entities()).at(-1);
+  ok(line?.type === 'segment' && line.a.x === a.x && line.a.y === a.y && Math.abs(line.b.x - up.x) < 1e-9, 'arrastre de 15 px: crea la línea con extremos exactos');
+  log('G1: temblor ≤ 9 px = toque (regla, compás, punto, con y sin zoom); arrastre de 15 px = línea exacta');
+}
+
+// ───────── 11) G2: palma apoyada antes que el lápiz, sin sobrevuelo ─────────
+{
+  await fresh();
+  await penTap(200, 290); // el lápiz queda detectado; se ha fijado un punto en Lápiz → se deshace
+  await page.click('[data-testid=button-undo]').catch(() => {});
+  await page.waitForTimeout(700);
+  const v0 = await view();
+  // Palma pequeña e inmóvil (< 12 px): no mueve la hoja.
+  await touch('touchStart', [{ x: 900, y: 650, id: 9 }]); await touch('touchMove', [{ x: 906, y: 645, id: 9 }]); await touch('touchEnd', []);
+  let v1 = await view(); ok(v1.tx === v0.tx && v1.ty === v0.ty, 'palma casi quieta (8 px): la hoja no se mueve');
+  // Palma que se desliza 36 px y, enseguida, el lápiz: el desplazamiento se deshace.
+  await page.waitForTimeout(700);
+  await touch('touchStart', [{ x: 900, y: 650, id: 9 }]);
+  for (let i = 1; i <= 6; i += 1) await touch('touchMove', [{ x: 900 - i * 6, y: 650 - i * 4, id: 9 }]);
+  const moved = await view(); ok(moved.tx !== v0.tx, '(la palma llegó a mover la hoja antes del lápiz)');
+  await page.click('[data-testid=tool-pen]').catch(() => {});
+  const p = await toClient(60, 120); await pen('mouseMoved', p, 0); await pen('mousePressed', p);
+  for (let i = 1; i <= 5; i += 1) await pen('mouseMoved', { x: p.x + i * 10, y: p.y });
+  v1 = await view();
+  ok(v1.tx === v0.tx && v1.ty === v0.ty && v1.scale === v0.scale, 'al apoyar el lápiz, el desplazamiento de la palma se deshace');
+  await pen('mouseReleased', { x: p.x + 50, y: p.y }, 0); await touch('touchEnd', []);
+  const st = (await entities()).at(-1);
+  ok(st?.type === 'polyline' && Math.max(...st.points.map((q) => q.y)) - Math.min(...st.points.map((q) => q.y)) < 1e-9, 'el trazo del lápiz no se deforma');
+  // Navegación intencionada (sin lápiz) sigue funcionando: arrastre y pellizco.
+  await page.waitForTimeout(700);
+  const v2 = await view();
+  await touch('touchStart', [{ x: 800, y: 500, id: 3 }]);
+  for (let i = 1; i <= 6; i += 1) await touch('touchMove', [{ x: 800 - i * 10, y: 500, id: 3 }]);
+  await touch('touchEnd', []);
+  ok(Math.abs((await view()).tx - (v2.tx - 60)) < 1e-6, 'un dedo intencionado desplaza la hoja (60 px exactos, sin salto)');
+  const v3 = await view();
+  await touch('touchStart', [{ x: 700, y: 400, id: 1 }, { x: 800, y: 400, id: 2 }]);
+  for (let i = 1; i <= 5; i += 1) await touch('touchMove', [{ x: 700 - i * 10, y: 400, id: 1 }, { x: 800 + i * 10, y: 400, id: 2 }]);
+  await touch('touchEnd', []);
+  ok((await view()).scale > v3.scale * 1.8, 'el pellizco sigue ampliando');
+  log('G2: la palma quieta no mueve la hoja; la que se desliza se deshace al llegar el lápiz; arrastre y pellizco intactos');
+}
+
+// ───────── 12) G3: modo automático y preferencia persistente ─────────
+{
+  await fresh();
+  await page.click('[data-testid=tool-pen]');
+  const fingerStroke = async () => {
+    const p = await toClient(40, 200);
+    await touch('touchStart', [{ x: p.x, y: p.y, id: 1 }]);
+    for (let i = 1; i <= 6; i += 1) await touch('touchMove', [{ x: p.x + i * 10, y: p.y, id: 1 }]);
+    await touch('touchEnd', []);
+  };
+  await fingerStroke();
+  let list = await page.evaluate(async () => { await new Promise((r) => setTimeout(r, 550)); return JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).entities; });
+  ok(list.length === 0, 'automático sin lápiz detectado: el primer toque del dedo no dibuja');
+  ok(await page.locator('[data-testid=finger-prompt]').isVisible(), 'se ofrece dibujar con el dedo');
+  await page.click('[data-testid=button-finger-draw]');
+  await fingerStroke();
+  ok((await entities()).length === 1, 'tras elegirlo, el dedo dibuja');
+  await page.reload(); await page.waitForSelector('[data-testid=drawing-sheet]');
+  ok(await page.locator('[data-testid=seg-finger-mode-all]').getAttribute('class') === 'on', '«Dedo dibuja» se conserva tras recargar');
+  // Detección del lápiz: se activa con un sobrevuelo, persiste y se puede olvidar.
+  await fresh();
+  ok((await page.locator('[data-testid=text-pen-detected]').innerText()).includes('aún no'), 'estado inicial: lápiz no detectado');
+  const hp = await toClient(100, 100); await pen('mouseMoved', hp, 0); await pen('mouseMoved', { x: hp.x + 5, y: hp.y }, 0);
+  await page.waitForTimeout(100);
+  await page.reload(); await page.waitForSelector('[data-testid=drawing-sheet]');
+  ok((await page.locator('[data-testid=text-pen-detected]').innerText()).includes('S Pen detectado'), 'la detección (por sobrevuelo) persiste tras recargar');
+  await page.click('[data-testid=tool-pen]');
+  await fingerStroke();
+  ok(!(await page.locator('[data-testid=finger-prompt]').isVisible()) && (await page.evaluate(async () => { await new Promise((r) => setTimeout(r, 550)); return JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).entities.length; })) === 0, 'con lápiz detectado, el dedo navega y no se pregunta');
+  await page.click('[data-testid=button-forget-pen]');
+  ok((await page.locator('[data-testid=text-pen-detected]').innerText()).includes('aún no'), '«Olvidar» vuelve al estado inicial seguro');
+  log('G3: el dedo no dibuja hasta elegirlo; la elección y la detección del lápiz persisten; «Olvidar» funciona');
+}
+
+// ───────── 13) F: márgenes con decimales ─────────
+{
+  await fresh();
+  const field = page.locator('[data-testid=input-margin-left]');
+  await field.click(); await field.fill(''); await field.pressSequentially('12.5');
+  ok(await field.inputValue() === '12.5', 'mientras se escribe, el texto no se reformatea');
+  await field.press('Enter');
+  const right = page.locator('[data-testid=input-margin-right]');
+  await right.click(); await right.fill(''); await right.pressSequentially('12,5'); await right.press('Enter');
+  await page.waitForTimeout(550);
+  let m = await page.evaluate(() => JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).margins);
+  ok(m.left === 12.5 && m.right === 12.5, `«12.5» y «12,5» se guardan como 12,5 mm (${m.left}, ${m.right})`);
+  const top = page.locator('[data-testid=input-margin-top]');
+  await top.click(); await top.fill(''); await top.pressSequentially('50'); await top.press('Enter');
+  ok(await page.locator('[data-testid=input-margin-top-error]').isVisible(), 'fuera de 0–40 mm muestra un error');
+  await page.waitForTimeout(550);
+  m = await page.evaluate(() => JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).margins);
+  ok(m.top === 10 && await top.inputValue() === '10', 'el valor no válido no se aplica y se recupera el anterior');
+  const marginRect = await page.evaluate(() => [...document.querySelectorAll('[data-testid=drawing-sheet] rect')].find((r) => r.getAttribute('stroke-dasharray'))?.getAttribute('x'));
+  ok(marginRect === '12.5', 'la guía de márgenes usa 12,5 mm');
+  log('F: márgenes «12.5» y «12,5» admitidos; 50 rechazado con mensaje');
+}
+
+// ───────── 14) Cancelación del sistema (pointercancel) ─────────
+async function systemCancel() {
+  await page.evaluate(() => {
+    const d = window.__downs.at(-1);
+    document.querySelector('[data-testid=drawing-sheet]').dispatchEvent(new PointerEvent('pointercancel', { pointerId: d.id, pointerType: d.t, bubbles: true, clientX: d.x, clientY: d.y }));
+  });
+}
+{
+  await fresh();
+  await page.click('[data-testid=tool-pen]');
+  const p = await toClient(30, 80); await pen('mouseMoved', p, 0); await pen('mousePressed', p);
+  for (let i = 1; i <= 8; i += 1) await pen('mouseMoved', { x: p.x + i * 12, y: p.y + i * 3 });
+  await systemCancel();
+  await pen('mouseReleased', { x: p.x + 96, y: p.y + 24 }, 0);
+  let list = await entities();
+  ok(list.length === 1 && list[0].type === 'polyline' && list[0].points.length >= 9, `trazo del lápiz interrumpido: se conserva (${list[0]?.points.length} puntos)`);
+  ok((await page.locator('[data-testid=text-notice]').innerText()).includes('interrumpió'), 'se avisa de la interrupción');
+  await page.click('[data-testid=button-undo]');
+  ok((await entities()).length === 0, 'el trazo conservado se deshace en un paso');
+  await page.click('[data-testid=tool-ruler]');
+  await penTap(50, 50);
+  const q = await toClient(120, 80); await pen('mouseMoved', q, 0); await pen('mousePressed', q); await pen('mouseMoved', { x: q.x + 40, y: q.y });
+  await systemCancel();
+  await pen('mouseReleased', { x: q.x + 40, y: q.y }, 0);
+  ok((await entities()).length === 0 && (await page.locator('[data-testid=status-ruler] b').innerText()).includes('02'), 'regla interrumpida: no crea nada y conserva el inicio ya marcado');
+  ok((await page.locator('[data-testid=preview]').count()) <= 1, 'no queda una vista previa de arrastre colgada');
+  await page.click('[data-testid=seg-finger-mode-all]'); await page.click('[data-testid=tool-pen]');
+  const f = await toClient(40, 200);
+  await touch('touchStart', [{ x: f.x, y: f.y, id: 1 }]);
+  for (let i = 1; i <= 5; i += 1) await touch('touchMove', [{ x: f.x + i * 10, y: f.y, id: 1 }]);
+  await systemCancel();
+  await touch('touchEnd', []);
+  ok((await entities()).length === 0, 'trazo del dedo interrumpido: se descarta');
+  log('cancelación: lápiz conserva lo dibujado; construcciones y dedo se descartan limpiamente');
+}
 
 ok(pageErrors.length === 0, `errores de página: ${pageErrors.join(' | ')}`);
 await browser.close();

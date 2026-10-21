@@ -11,7 +11,10 @@ import {
   arcSet, circleCapsuleCover, complementSet, eraseAlongPath, eraseEntity, intersectSets, segmentCapsuleInterval, unionSets,
 } from '../src/lib/erase.js';
 import { docToScreen, fitView, pinchView, screenToDoc, zoomAt } from '../src/lib/view.js';
-import { PEN_PROXIMITY_MS, createPolicy, navPointers, penHover, pointerDown, pointerUp } from '../src/lib/pointer-policy.js';
+import {
+  PAN_SLOP_PX, PEN_PROXIMITY_MS, TAP_SLOP_PX, beyondTapSlop, cancelOutcome, createPolicy, navPointers, penHover, pointerDown,
+  pointerUp, shouldRevertNav,
+} from '../src/lib/pointer-policy.js';
 
 let checks = 0;
 const ok = (cond, msg) => { checks += 1; assert.ok(cond, msg); };
@@ -259,11 +262,15 @@ ok(cutCount > 100, `debe haber suficientes cortes reales en la muestra (${cutCou
 // ───────── 8) Política de punteros (rechazo de palma, dedo, pellizco) ─────────
 {
   let pol = createPolicy('auto');
-  ok(pointerDown(pol, { id: 1, type: 'touch', t: 0 }).role === 'draw', 'auto: el dedo dibuja si no hay lápiz');
+  ok(pointerDown(pol, { id: 1, type: 'touch', t: 0 }).role === 'nav', 'G3 auto: sin lápiz detectado, un primer toque del dedo NO dibuja');
+  pointerUp(pol, 1, 10);
+  pol = createPolicy('all');
+  ok(pointerDown(pol, { id: 1, type: 'touch', t: 0 }).role === 'draw', "modo 'all': el dedo dibuja");
   const second = pointerDown(pol, { id: 2, type: 'touch', t: 50 });
   ok(second.role === 'nav' && second.cancelDraw === 1, 'segundo dedo: pellizco y cancela el dibujo del primero');
   ok(navPointers(pol).length === 2, 'los dos dedos navegan');
   pointerUp(pol, 1, 100); pointerUp(pol, 2, 100);
+  pol = createPolicy('auto');
   const pen = pointerDown(pol, { id: 3, type: 'pen', t: 1000 });
   ok(pen.role === 'draw', 'el lápiz dibuja');
   ok(pointerDown(pol, { id: 4, type: 'touch', t: 1100 }).role === 'ignore', 'palma con el lápiz apoyado: se ignora');
@@ -278,7 +285,7 @@ ok(cutCount > 100, `debe haber suficientes cortes reales en la muestra (${cutCou
   ok(pointerDown(pol, { id: 8, type: 'touch', t: 9000, width: 90, height: 70 }).role === 'ignore', 'contacto grande = palma');
   pointerUp(pol, 8, 9000);
 
-  pol = createPolicy('auto');
+  pol = createPolicy('all');
   pointerDown(pol, { id: 1, type: 'touch', t: 0 });
   const p2 = pointerDown(pol, { id: 2, type: 'pen', t: 10 });
   ok(p2.role === 'draw' && p2.cancelDraw === 1, 'el lápiz cancela un dedo que estaba dibujando');
@@ -294,6 +301,35 @@ ok(cutCount > 100, `debe haber suficientes cortes reales en la muestra (${cutCou
   ok(pointerDown(createPolicy(), { id: 1, type: 'mouse', button: 0, t: 0 }).role === 'draw', 'ratón principal dibuja');
   ok(pointerDown(createPolicy(), { id: 1, type: 'mouse', button: 1, t: 0 }).role === 'nav', 'ratón central navega');
   ok(pointerDown(createPolicy(), { id: 1, type: 'pen', t: 0 }, { panTool: true }).role === 'nav', 'Desplazar: el lápiz navega');
+  // G2: palma ANTES del lápiz y sin sobrevuelo: navega, pero el lápiz la detiene y la interfaz la deshace.
+  pol = createPolicy('auto');
+  ok(pointerDown(pol, { id: 1, type: 'touch', t: 10000 }).role === 'nav', 'G2: palma sin lápiz cerca navega (sin sobrevuelo no se puede saber)');
+  const penAfter = pointerDown(pol, { id: 2, type: 'pen', t: 10300 });
+  ok(penAfter.role === 'draw' && penAfter.stopNav, 'G2: al apoyar el lápiz se detiene esa navegación');
+  ok(shouldRevertNav(10000, 10300) && shouldRevertNav(10000, 10000 + PEN_PROXIMITY_MS), 'G2: navegación iniciada ≤ 600 ms antes del lápiz → se deshace');
+  ok(!shouldRevertNav(10000, 10000 + PEN_PROXIMITY_MS + 1) && !shouldRevertNav(NaN, 5), 'G2: navegación intencionada más antigua → se conserva');
+  ok(PAN_SLOP_PX === 12 && PEN_PROXIMITY_MS === 600, 'umbrales documentados');
+}
+
+// ───────── 9) G1: toque frente a arrastre en px de PANTALLA ─────────
+{
+  const o = { x: 100, y: 100 };
+  ok(TAP_SLOP_PX.pen === 10 && TAP_SLOP_PX.touch === 12 && TAP_SLOP_PX.mouse === 4, 'umbrales de toque');
+  ok(!beyondTapSlop('pen', o, { x: 105, y: 100 }) && !beyondTapSlop('pen', o, { x: 107, y: 107 }), 'temblor del lápiz de 5–9,9 px = toque');
+  ok(beyondTapSlop('pen', o, { x: 110.5, y: 100 }), 'más de 10 px = arrastre');
+  ok(!beyondTapSlop('touch', o, { x: 111, y: 100 }) && beyondTapSlop('touch', o, { x: 113, y: 100 }), 'dedo: 12 px');
+  ok(beyondTapSlop('mouse', o, { x: 105, y: 100 }), 'ratón: 4 px');
+  ok(!beyondTapSlop('desconocido', o, { x: 111, y: 100 }), 'tipo desconocido usa el umbral del dedo');
+}
+
+// ───────── 10) Cancelación del sistema (pointercancel) ─────────
+{
+  ok(cancelOutcome('pen', 'pen', 25) === 'keep', 'trazo del lápiz interrumpido: se conserva');
+  ok(cancelOutcome('pen', 'pen', 1) === 'discard', 'trazo de un solo punto: se descarta');
+  ok(cancelOutcome('eraser', 'pen', 3) === 'keep', 'borrado ya visible: se conserva');
+  for (const tool of ['ruler', 'compass', 'point', 'protractor', 'parallel', 'perpendicular', 'select']) ok(cancelOutcome(tool, 'pen', 2) === 'discard', `${tool}: se descarta limpiamente`);
+  ok(cancelOutcome('pen', 'touch', 50) === 'discard' && cancelOutcome('eraser', 'touch', 5) === 'discard', 'dedo: se descarta');
+  ok(cancelOutcome('pen', 'mouse', 5) === 'keep', 'ratón: se conserva');
 }
 
 console.log(`Documento OK: ${checks} comprobaciones (migración, edición, historial, borrador exacto, vista y punteros).`);

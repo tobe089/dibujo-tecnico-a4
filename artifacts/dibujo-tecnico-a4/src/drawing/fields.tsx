@@ -29,30 +29,41 @@ export function NumField({ label, value, onChange, unit, testid }: {
 /**
  * Campo ligado a un número EXACTO. Muestra el valor redondeado para leerlo, pero solo lo sustituye
  * cuando el usuario escribe algo: enfocar y salir sin escribir no cambia el valor guardado.
- * Confirma al pulsar Intro o al salir del campo.
+ * Mientras se edita, el texto escrito no se reformatea. Confirma al pulsar Intro o al salir del campo;
+ * si `validate` devuelve un mensaje, no se confirma: se muestra el error y se recupera el valor guardado.
  */
-export function ExactField({ label, value, onCommit, unit, testid, decimals = 3 }: {
+export function ExactField({ label, value, onCommit, unit, testid, decimals = 3, validate, inputClassName = 'number-input', bare = false }: {
   label: string; value: number; onCommit: (value: number) => void; unit?: string; testid?: string; decimals?: number;
+  validate?: (value: number) => string | null; inputClassName?: string; bare?: boolean;
 }) {
   const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const shown = text ?? fmtNum(value, decimals);
-  const invalid = text !== null && text.trim() !== '' && !Number.isFinite(toNum(text));
+  const parsed = text === null ? value : toNum(text);
+  const invalid = text !== null && text.trim() !== '' && (!Number.isFinite(parsed) || !!validate?.(parsed));
   const finish = () => {
     if (text !== null) {
       const v = toNum(text);
-      if (Number.isFinite(v)) onCommit(v);
+      const problem = !Number.isFinite(v) ? 'Escribe un número (se admite coma o punto decimal).' : validate?.(v) ?? null;
+      if (problem) setError(problem);
+      else { setError(null); onCommit(v); }
     }
     setText(null);
   };
+  const input = <input
+    type="text" inputMode="decimal" autoComplete="off" spellCheck={false}
+    className={`${inputClassName} ${invalid ? 'invalid' : ''}`} value={shown}
+    onChange={event => { setText(event.target.value); setError(null); }}
+    onBlur={finish}
+    onKeyDown={event => { if (event.key === 'Enter') (event.target as HTMLInputElement).blur(); if (event.key === 'Escape') { setText(null); setError(null); (event.target as HTMLInputElement).blur(); } }}
+    data-testid={testid}
+  />;
+  const errorLine = error && <span className="field-error" data-testid={testid ? `${testid}-error` : undefined}>{error}</span>;
+  if (bare) return <>{label}{input}{errorLine}</>;
   return <label className="field">
     <span className="field-label">{label}{unit && <em>{unit}</em>}</span>
-    <input
-      {...inputProps} className={`number-input ${invalid ? 'invalid' : ''}`} value={shown}
-      onChange={event => setText(event.target.value)}
-      onBlur={finish}
-      onKeyDown={event => { if (event.key === 'Enter') (event.target as HTMLInputElement).blur(); if (event.key === 'Escape') { setText(null); (event.target as HTMLInputElement).blur(); } }}
-      data-testid={testid}
-    />
+    {input}
+    {errorLine}
   </label>;
 }
 

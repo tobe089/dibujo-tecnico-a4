@@ -7,21 +7,53 @@
 //   2. Mientras el lápiz está apoyado o se ha visto hace menos de PEN_PROXIMITY_MS (sobrevuelo o recién
 //      levantado), los toques se ignoran: así se descarta la palma apoyada mientras se dibuja.
 //   3. Un contacto más grande que PALM_SIZE_PX se ignora (palma), si el navegador informa del tamaño.
-//   4. El dedo dibuja según el modo: 'all' siempre; 'pen' nunca (solo navega); 'auto' hasta que se detecta
-//      un S Pen en la sesión.
+//   4. El dedo dibuja SOLO si el usuario lo elige (modo 'all'). En 'auto' y 'pen' el dedo navega: así un
+//      primer toque accidental nunca crea geometría. En 'auto', si aún no se ha detectado un S Pen, la
+//      interfaz ofrece activar el dibujo con el dedo (nunca queda bloqueado el uso sin lápiz).
+//   4b. Palma que llega ANTES que el lápiz (sin sobrevuelo): un dedo solo empieza a desplazar la hoja tras
+//      moverse PAN_SLOP_PX; y si el lápiz se apoya antes de PEN_PROXIMITY_MS desde que empezó esa
+//      navegación, la interfaz la deshace (shouldRevertNav). No depende de recibir eventos de sobrevuelo.
 //   5. Un segundo dedo convierte el gesto en navegación (pellizco) y CANCELA lo que el primero estuviera
 //      dibujando: las herramientas solo confirman al levantar, así que cancelar no deja rastro.
 //   6. Ratón: botón principal dibuja; central/secundario navegan.
 
 export const PEN_PROXIMITY_MS = 600;
 export const PALM_SIZE_PX = 60;
+/** Movimiento máximo (px de PANTALLA, no mm) para que un contacto cuente como toque y no como arrastre. */
+export const TAP_SLOP_PX = { pen: 10, mouse: 4, touch: 12 };
+/** Movimiento (px de pantalla) que debe hacer un dedo antes de empezar a desplazar la hoja. */
+export const PAN_SLOP_PX = 12;
+
+/** ¿Se ha alejado el contacto lo bastante (en px de pantalla) como para ser un arrastre? */
+export function beyondTapSlop(pointerType, start, current) {
+  const slop = TAP_SLOP_PX[pointerType] ?? TAP_SLOP_PX.touch;
+  return Math.hypot(current.x - start.x, current.y - start.y) > slop;
+}
+
+/** ¿Hay que deshacer la navegación en curso porque el lápiz se apoyó poco después de que empezara? */
+export function shouldRevertNav(navStartT, penDownT) {
+  return Number.isFinite(navStartT) && penDownT - navStartT <= PEN_PROXIMITY_MS;
+}
+
+/**
+ * Qué hacer con un gesto de dibujo cuando el sistema lo cancela (pointercancel).
+ *  'keep'    → conservar lo dibujado hasta la interrupción (trazo libre o borrado ya visible, con lápiz o ratón).
+ *  'discard' → descartar limpiamente sin cambiar nada (construcciones cuyo punto final no se conoce,
+ *              o contactos del dedo, que Android cancela sobre todo al detectar gestos o palma).
+ */
+export function cancelOutcome(tool, pointerType, pointCount) {
+  if (pointerType === 'touch') return 'discard';
+  if (tool === 'pen') return pointCount >= 2 ? 'keep' : 'discard';
+  if (tool === 'eraser') return 'keep';
+  return 'discard';
+}
 
 export function createPolicy(fingerMode = 'auto') {
   return { pointers: new Map(), penSeen: false, penLastSeen: -Infinity, fingerMode };
 }
 
 export function fingerDraws(policy) {
-  return policy.fingerMode === 'all' || (policy.fingerMode === 'auto' && !policy.penSeen);
+  return policy.fingerMode === 'all';
 }
 
 function activeTouches(policy, exceptId) {

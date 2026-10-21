@@ -16,14 +16,21 @@ import { eraseWithCapsule } from '@/lib/erase.js';
 import { buildSheetSvg, entityPathD, gridStyle, n, pointRadius } from '@/lib/render.js';
 import { MAX_SCALE, MIN_SCALE, fitView, panBy, pinchView, screenToDoc, viewBoxFor, zoomAt, type View } from '@/lib/view.js';
 import {
-  createPolicy, fingerDraws, navPointers, penHover, pointerDown, pointerUp, roleOf, type FingerMode,
+  PAN_SLOP_PX, beyondTapSlop, cancelOutcome, createPolicy, navPointers, penHover, pointerDown, pointerUp, roleOf,
+  shouldRevertNav, type FingerMode,
 } from '@/lib/pointer-policy.js';
 import { EntityEditor } from './EntityEditor';
 import { ExactField, NumField, Seg, Toggle, fmtNum, toNum } from './fields';
 
 type Tool = 'pen' | 'point' | 'ruler' | 'compass' | 'protractor' | 'parallel' | 'perpendicular' | 'eraser' | 'select' | 'pan';
 type Placement = 'start' | 'center' | 'foot';
-type Prefs = { fingerMode: FingerMode; eraserPx: number; eraserMode: 'partial' | 'whole' };
+/**
+ * fingerMode: 'auto' (el dedo navega; si no hay S Pen detectado se ofrece activar el dibujo con el dedo),
+ * 'pen' (el dedo solo navega) o 'all' (el dedo también dibuja). Se guarda entre recargas.
+ * penDetected: se activa al primer evento de lápiz (apoyo o sobrevuelo) y se conserva entre recargas;
+ * «Olvidar» lo devuelve al estado seguro inicial (el dedo sigue navegando, no dibuja).
+ */
+type Prefs = { fingerMode: FingerMode; eraserPx: number; eraserMode: 'partial' | 'whole'; penDetected: boolean; penDetectedAt: string | null };
 type Calib = { devPxPerMm: number; dpr: number; at: string };
 type Meta = { margins: Margins; color: string; width: number };
 type Draft = { type: Entity['type'] } & EntityPatch;
@@ -41,7 +48,8 @@ const CALIB_KEY = 'dibujo-tecnico-a4-calibracion';
 const CAL_MM = 100;
 const HIT_PX = 12;
 const colors = ['#244d58', '#bc573f', '#1e7663', '#3c4b8c', '#252b2d'];
-const initialPrefs: Prefs = { fingerMode: 'auto', eraserPx: 10, eraserMode: 'partial' };
+const initialPrefs: Prefs = { fingerMode: 'auto', eraserPx: 10, eraserMode: 'partial', penDetected: false, penDetectedAt: null };
+const DRAWING_TOOLS: Tool[] = ['pen', 'point', 'ruler', 'compass', 'protractor', 'parallel', 'perpendicular', 'eraser'];
 const CONSTRUCTION: Tool[] = ['point', 'ruler', 'compass', 'protractor', 'parallel', 'perpendicular'];
 
 function loadPrefs(): Prefs {
@@ -51,6 +59,8 @@ function loadPrefs(): Prefs {
       fingerMode: ['auto', 'pen', 'all'].includes(p.fingerMode) ? p.fingerMode : initialPrefs.fingerMode,
       eraserPx: Number.isFinite(p.eraserPx) ? Math.max(3, Math.min(40, p.eraserPx)) : initialPrefs.eraserPx,
       eraserMode: p.eraserMode === 'whole' ? 'whole' : 'partial',
+      penDetected: p.penDetected === true,
+      penDetectedAt: typeof p.penDetectedAt === 'string' ? p.penDetectedAt : null,
     };
   } catch { return initialPrefs; }
 }
@@ -100,7 +110,7 @@ export function DrawingApp() {
   const [calMeasured, setCalMeasured] = useState('');
   const [notice, setNotice] = useState('');
   const [hover, setHover] = useState<Pt | null>(null);
-  const [penSeen, setPenSeen] = useState(false);
+  const [fingerPrompt, setFingerPrompt] = useState<'hidden' | 'shown' | 'dismissed'>('hidden');
   const [, setTick] = useState(0);
 
   // Regla
@@ -140,7 +150,10 @@ export function DrawingApp() {
   const svgRef = useRef<SVGSVGElement>(null);
   const policyRef = useRef(createPolicy(prefs.fingerMode));
   const positions = useRef(new Map<number, Pt>());
-  const navRef = useRef<{ mode: 'pan'; id: number; last: Pt } | { mode: 'pinch'; a: number; b: number; start: { view: View; a: Pt; b: Pt } } | null>(null);
+  /** pan.armed: un dedo no desplaza la hoja hasta moverse PAN_SLOP_PX (una palma quieta no la mueve). */
+  const navRef = useRef<{ mode: 'pan'; id: number; last: Pt; origin: Pt; armed: boolean } | { mode: 'pinch'; a: number; b: number; start: { view: View; a: Pt; b: Pt } } | null>(null);
+  /** Vista y momento en que empezó la navegación actual: si el lápiz se apoya poco después, se deshace. */
+  const navSessionRef = useRef<{ view: View; t0: number } | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
   /** Toque de un dedo que navega: si no se mueve, con Seleccionar cuenta como selección. */
   const navTapRef = useRef<{ id: number; start: Pt; moved: boolean } | null>(null);
@@ -192,6 +205,10 @@ export function DrawingApp() {
     return () => window.clearTimeout(timer);
   }, [entities, meta]);
   useEffect(() => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* no crítico */ } }, [prefs]);
+  /** Recuerda (también tras recargar) que este navegador ha recibido eventos de un S Pen. */
+  const markPenDetected = () => {
+    if (!prefs.penDetected) setPrefs(p => (p.penDetected ? p : { ...p, penDetected: true, penDetectedAt: new Date().toISOString().slice(0, 10) }));
+  };
 
   // ── Historial ──
   const commit = useCallback((next: Entity[]) => {
@@ -257,19 +274,30 @@ export function DrawingApp() {
   const docOf = (s: Pt): Pt => screenToDoc(viewRef.current, s.x, s.y);
 
   // ── Navegación ──
-  const restartNav = () => {
+  const restartNav = (t: number) => {
+    const previous = navRef.current;
     const ids = navPointers(policyRef.current).filter(id => positions.current.has(id));
     if (ids.length >= 2) {
       const [a, b] = ids;
       navRef.current = { mode: 'pinch', a, b, start: { view: viewRef.current, a: positions.current.get(a)!, b: positions.current.get(b)! } };
     } else if (ids.length === 1) {
-      navRef.current = { mode: 'pan', id: ids[0], last: positions.current.get(ids[0])! };
+      const pos = positions.current.get(ids[0])!;
+      const type = policyRef.current.pointers.get(ids[0])?.type;
+      // Tras un pellizco, el dedo que queda continúa sin umbral; ratón y lápiz (Desplazar) tampoco lo necesitan.
+      const armed = type !== 'touch' || previous?.mode === 'pinch';
+      navRef.current = { mode: 'pan', id: ids[0], last: pos, origin: pos, armed };
     } else navRef.current = null;
+    if (!previous && navRef.current) navSessionRef.current = { view: viewRef.current, t0: t };
+    if (!navRef.current) navSessionRef.current = null;
   };
   const updateNav = (id: number, s: Pt) => {
     const nav = navRef.current;
     if (!nav) return;
     if (nav.mode === 'pan' && nav.id === id) {
+      if (!nav.armed) {
+        if (Math.hypot(s.x - nav.origin.x, s.y - nav.origin.y) <= PAN_SLOP_PX) return;
+        nav.armed = true; // a partir de aquí sigue al dedo desde donde se apoyó (sin salto)
+      }
       setView(v => panBy(v, s.x - nav.last.x, s.y - nav.last.y));
       nav.last = s;
     } else if (nav.mode === 'pinch' && (nav.a === id || nav.b === id)) {
@@ -296,7 +324,8 @@ export function DrawingApp() {
     for (const { s, pressure } of samples) {
       const d = docOf(s);
       g.curDoc = d;
-      if (!g.moved && Math.hypot(s.x - g.startScreen.x, s.y - g.startScreen.y) > (g.pointerType === 'touch' ? 8 : 4)) g.moved = true;
+      // Toque o arrastre se decide en px de PANTALLA (TAP_SLOP_PX); las coordenadas guardadas siguen siendo las exactas.
+      if (!g.moved && beyondTapSlop(g.pointerType, g.startScreen, s)) g.moved = true;
       if (g.tool === 'pen') g.points.push(g.pointerType === 'pen' ? { ...d, p: pressure } : d);
       if (g.tool === 'eraser' && g.working && g.lastErase) {
         g.working = eraseWithCapsule(g.working, g.lastErase, d, g.eraseR, { mode: prefs.eraserMode });
@@ -389,13 +418,21 @@ export function DrawingApp() {
     const e = event.nativeEvent;
     const s = screenOf(e);
     const res = pointerDown(policyRef.current, { id: e.pointerId, type: e.pointerType, t: e.timeStamp, button: e.button, width: e.width, height: e.height }, { panTool: tool === 'pan' });
-    if (e.pointerType === 'pen' && !penSeen) setPenSeen(true);
+    if (e.pointerType === 'pen') markPenDetected();
     try { event.currentTarget.setPointerCapture(e.pointerId); } catch { /* puntero ya liberado */ }
     positions.current.set(e.pointerId, s);
     if (res.cancelDraw !== null && gestureRef.current?.id === res.cancelDraw) cancelGesture();
-    if (res.stopNav) navRef.current = null;
+    if (res.stopNav) {
+      // Palma que llegó antes que el lápiz: si esa navegación empezó hace poco, se deshace por completo.
+      const session = navSessionRef.current;
+      if (session && shouldRevertNav(session.t0, e.timeStamp)) setView(session.view);
+      navRef.current = null;
+      navSessionRef.current = null;
+      navTapRef.current = null;
+    }
+    if (e.pointerType === 'touch' && res.role === 'nav' && prefs.fingerMode === 'auto' && !prefs.penDetected && fingerPrompt === 'hidden' && DRAWING_TOOLS.includes(tool)) setFingerPrompt('shown');
     if (res.role === 'nav') {
-      restartNav();
+      restartNav(e.timeStamp);
       const solo = navRef.current?.mode === 'pan' && navRef.current.id === e.pointerId;
       navTapRef.current = solo ? { id: e.pointerId, start: s, moved: false } : null;
     } else if (res.role === 'draw') beginGesture(e.pointerId, e.pointerType, s, docOf(s), e.pressure);
@@ -405,7 +442,7 @@ export function DrawingApp() {
     const role = roleOf(policyRef.current, e.pointerId);
     if (role === null) {
       // Sobrevuelo del lápiz o ratón sin pulsar: vista previa y rechazo de palma.
-      if (e.pointerType === 'pen') penHover(policyRef.current, e.timeStamp);
+      if (e.pointerType === 'pen') { penHover(policyRef.current, e.timeStamp); markPenDetected(); }
       if (e.pointerType !== 'touch') setHover(docOf(screenOf(e)));
       return;
     }
@@ -413,7 +450,7 @@ export function DrawingApp() {
     positions.current.set(e.pointerId, s);
     if (role === 'nav') {
       const tap = navTapRef.current;
-      if (tap && tap.id === e.pointerId && Math.hypot(s.x - tap.start.x, s.y - tap.start.y) > 8) tap.moved = true;
+      if (tap && tap.id === e.pointerId && beyondTapSlop('touch', tap.start, s)) tap.moved = true;
       updateNav(e.pointerId, s);
       return;
     }
@@ -437,12 +474,20 @@ export function DrawingApp() {
         setSelectedId(hit ? hit.id : null);
         setEditError(null);
       }
-      restartNav();
+      restartNav(e.timeStamp);
     }
     const g = gestureRef.current;
     if (role === 'draw' && g && g.id === e.pointerId) {
-      if (cancelled) cancelGesture();
-      else finishGesture(g);
+      if (!cancelled) finishGesture(g);
+      else if (cancelOutcome(g.tool, g.pointerType, g.points.length) === 'keep') {
+        // Android interrumpió el lápiz: se conserva lo dibujado o borrado hasta ese momento (un paso de deshacer).
+        finishGesture(g);
+        setNotice('El sistema interrumpió el trazo: se conservó hasta el punto de interrupción.');
+      } else {
+        // Construcción sin punto final conocido, o contacto del dedo: se descarta sin cambiar nada.
+        cancelGesture();
+        if (g.pointerType !== 'touch') setNotice('El sistema interrumpió el gesto: no se ha creado nada.');
+      }
     }
   };
 
@@ -577,10 +622,10 @@ export function DrawingApp() {
     setModal(null);
     window.setTimeout(() => window.print(), 120);
   };
-  const setMargin = (key: keyof Margins, value: string) => {
-    const amount = Math.max(0, Math.min(40, toNum(value) || 0));
+  const setMargin = (key: keyof Margins, amount: number) => {
     setMeta(current => ({ ...current, margins: { ...current.margins, [key]: amount } }));
   };
+  const validateMargin = (v: number) => (v >= 0 && v <= 40 ? null : 'Debe estar entre 0 y 40 mm.');
 
   // ── Escala 1:1 (función existente; requiere calibración manual) ──
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
@@ -675,7 +720,7 @@ export function DrawingApp() {
   const noticeLine = notice ? <div className="notice" data-testid="text-notice">{notice}</div> : null;
   const liveLine = livePreview ? <div className="hint-small mono-line" data-testid="text-live">Vista previa: {livePreview.label}</div> : null;
   const scaleLabel = screenScale === null ? 'escala sin calibrar' : Math.abs(screenScale - 1) < 0.005 ? '1:1 real' : `×${screenScale.toFixed(2)}`;
-  const fingerNow = fingerDraws(policyRef.current) && prefs.fingerMode !== 'pen';
+  const fingerNow = prefs.fingerMode === 'all';
   const toolHints: Record<Tool, string> = {
     pen: 'Trazo libre', point: 'Toca para marcar un punto', ruler: 'Regla: toca inicio y final', compass: 'Compás: centro y radio',
     protractor: 'Transportador: ángulo exacto', parallel: 'Paralela a un segmento', perpendicular: 'Perpendicular a un segmento',
@@ -836,6 +881,8 @@ export function DrawingApp() {
             <div className="rule-box" data-testid="status-eraser">{prefs.eraserMode === 'partial' ? 'Quita solo la parte atravesada; lo demás conserva su geometría exacta (los círculos quedan como arcos).' : 'Quita entero cada elemento que toques.'} Un solo «Deshacer» recupera cada pasada.</div>
           </section>}
 
+          {(tool === 'pen' || tool === 'eraser') && notice && <section className="panel-section">{noticeLine}</section>}
+
           {tool === 'select' && <section className="panel-section">
             <div className="section-head">Selección</div>
             {editor ?? <div className="rule-box" data-testid="status-selection">Toca un elemento para ver y editar sus medidas exactas.</div>}
@@ -845,15 +892,18 @@ export function DrawingApp() {
             <div className="section-head">Entrada</div>
             <Seg value={prefs.fingerMode} onChange={fingerMode => setPrefs(p => ({ ...p, fingerMode }))} testid="seg-finger-mode" options={[{ value: 'auto', label: 'Automático' }, { value: 'pen', label: 'Dedo navega' }, { value: 'all', label: 'Dedo dibuja' }]} />
             <div className="hint-small" data-testid="text-input-mode">
-              {prefs.fingerMode === 'auto' ? (penSeen ? 'S Pen detectado: dibuja el lápiz; el dedo mueve y amplía la hoja.' : 'Sin lápiz detectado: el dedo dibuja. Al usar el S Pen, el dedo pasa a navegar.') : prefs.fingerMode === 'pen' ? 'El dedo solo mueve y amplía la hoja.' : 'El dedo también dibuja (dos dedos siguen navegando).'}
-              {' '}Mientras el lápiz está cerca de la pantalla se ignoran los toques de la palma.
+              {prefs.fingerMode === 'all' ? 'El dedo también dibuja (dos dedos siguen navegando).' : prefs.fingerMode === 'pen' ? 'El dedo solo mueve y amplía la hoja.' : 'Dibuja el S Pen; el dedo mueve y amplía la hoja. Para dibujar con el dedo, elige «Dedo dibuja».'}
+              {' '}Se ignoran los toques mientras el lápiz está apoyado o cerca, y un desplazamiento que empezó justo antes de apoyar el lápiz se deshace.
+            </div>
+            <div className="pen-status" data-testid="text-pen-detected">
+              {prefs.penDetected ? <>S Pen detectado{prefs.penDetectedAt ? ` (${prefs.penDetectedAt})` : ''}<button className="link-btn" onClick={() => { setPrefs(p => ({ ...p, penDetected: false, penDetectedAt: null })); setFingerPrompt('hidden'); }} data-testid="button-forget-pen">Olvidar</button></> : 'S Pen aún no detectado en este navegador.'}
             </div>
           </section>
 
           <section className="panel-section">
             <div className="section-head">Márgenes · mm</div>
             <div className="margin-grid">
-              {(['top', 'right', 'bottom', 'left'] as const).map((side, index) => <label className="margin-field" key={side}>{['Superior', 'Derecho', 'Inferior', 'Izquierdo'][index]}<input type="text" inputMode="decimal" value={meta.margins[side]} onChange={event => setMargin(side, event.target.value)} data-testid={`input-margin-${side}`} /></label>)}
+              {(['top', 'right', 'bottom', 'left'] as const).map((side, index) => <label className="margin-field" key={side}><ExactField bare inputClassName="" label={['Superior', 'Derecho', 'Inferior', 'Izquierdo'][index]} value={meta.margins[side]} onCommit={v => setMargin(side, v)} validate={validateMargin} testid={`input-margin-${side}`} /></label>)}
             </div>
           </section>
 
@@ -916,6 +966,13 @@ export function DrawingApp() {
                 <line x1={hover.x} y1={hover.y - 4 * px} x2={hover.x} y2={hover.y + 4 * px} stroke="#4d6b72" strokeWidth={px} />
               </g>}
             </svg>}
+            {fingerPrompt === 'shown' && prefs.fingerMode === 'auto' && !prefs.penDetected && <div className="finger-prompt" role="dialog" aria-label="Dibujar con el dedo" data-testid="finger-prompt">
+              <span>Con «Automático» el dedo solo mueve la hoja, para que un toque accidental no dibuje. ¿Quieres dibujar con el dedo?</span>
+              <div className="create-row">
+                <button className="btn primary" onClick={() => { setPrefs(p => ({ ...p, fingerMode: 'all' })); setFingerPrompt('dismissed'); }} data-testid="button-finger-draw">Dibujar con el dedo</button>
+                <button className="btn" onClick={() => setFingerPrompt('dismissed')} data-testid="button-finger-dismiss">Uso el S Pen</button>
+              </div>
+            </div>}
             <div className="stage-hint"><strong>{toolHints[tool]}</strong> · {fingerNow ? 'Un dedo dibuja; dos dedos mueven y amplían' : 'Dedo: mover y ampliar'}</div>
           </div>
         </section>
