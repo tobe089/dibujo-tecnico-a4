@@ -5,12 +5,12 @@ import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
-import { DrawingApp } from '@/drawing/DrawingApp';
+import { AppRoot } from '@/drawing/AppRoot';
 
 const queryClient = new QueryClient();
 
 function Router() {
-  return <RoutedErrorBoundary><Switch><Route path="/" component={DrawingApp} /><Route component={NotFound} /></Switch></RoutedErrorBoundary>;
+  return <RoutedErrorBoundary><Switch><Route path="/" component={AppRoot} /><Route component={NotFound} /></Switch></RoutedErrorBoundary>;
 }
 function RoutedErrorBoundary({ children }: { children: ReactNode }) {
   const [location] = useLocation();

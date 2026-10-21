@@ -151,6 +151,14 @@ function lerp(a, b, t) {
 function capsuleBox(P, Q, r) {
   return { minX: Math.min(P.x, Q.x) - r, minY: Math.min(P.y, Q.y) - r, maxX: Math.max(P.x, Q.x) + r, maxY: Math.max(P.y, Q.y) + r };
 }
+// Caja envolvente por entidad. Las entidades son inmutables (cada cambio crea un objeto nuevo), así que la caché
+// no puede quedar desactualizada; evita recorrer todos los puntos de un trazo libre en cada pasada del borrador.
+const boundsCache = new WeakMap();
+function cachedBounds(e) {
+  let b = boundsCache.get(e);
+  if (!b) { b = entityBounds(e); boundsCache.set(e, b); }
+  return b;
+}
 const boxesOverlap = (a, b) => a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
 
 /** Intervalos [s0, s1] del parámetro de la polilínea (s = i + t) cubiertos por la cápsula. */
@@ -181,7 +189,7 @@ const polyLength = (pts) => pts.reduce((sum, p, i) => (i ? sum + segmentLength(p
  * El primer trozo conserva el id original; los demás reciben ids nuevos.
  */
 export function eraseEntity(e, P, Q, r, { mode = 'partial', newId = makeId } = {}) {
-  if (!boxesOverlap(entityBounds(e), capsuleBox(P, Q, r))) return null;
+  if (!boxesOverlap(cachedBounds(e), capsuleBox(P, Q, r))) return null;
   const style = { color: e.color, width: e.width };
   const ids = (i) => (i === 0 ? e.id : newId());
   switch (e.type) {

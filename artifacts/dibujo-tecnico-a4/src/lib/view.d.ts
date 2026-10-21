@@ -2,7 +2,7 @@ export type View = { scale: number; tx: number; ty: number };
 type P = { x: number; y: number };
 export const MIN_SCALE: number;
 export const MAX_SCALE: number;
-export function fitView(stageW: number, stageH: number, pad?: number): View;
+export function fitView(stageW: number, stageH: number, pad?: number, sheet?: { w: number; h: number }): View;
 export function screenToDoc(view: View, sx: number, sy: number): P;
 export function docToScreen(view: View, x: number, y: number): P;
 export function zoomAt(view: View, ax: number, ay: number, factor: number): View;

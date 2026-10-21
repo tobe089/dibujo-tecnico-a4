@@ -2,11 +2,9 @@ import {
   LineCapStyle, LineJoinStyle, PDFDocument, appendBezierCurve, closePath, fill, lineTo, moveTo, popGraphicsState,
   pushGraphicsState, rgb, setFillingRgbColor, setLineCap, setLineJoin, setLineWidth, setStrokingRgbColor, stroke,
 } from 'pdf-lib';
-import { arcToBeziers } from './geometry.js';
+import { arcToBeziers, sheetFor } from './geometry.js';
 
 const MM_TO_PT = 72 / 25.4;
-const SHEET_WIDTH_MM = 210;
-const SHEET_HEIGHT_MM = 297;
 const toPoints = (millimeters) => millimeters * MM_TO_PT;
 
 function rgbParts(hex) {
@@ -84,8 +82,14 @@ export function entityOperators(entity, pageHeight) {
   ];
 }
 
-/** PDF de una página A4 exacta con la cuadrícula, la guía de márgenes y las entidades en milímetros reales. */
-export async function createA4Pdf(entities, margins, { grid = true } = {}) {
+/**
+ * PDF de una página A4 exacta (vertical u horizontal) con la cuadrícula, la guía de márgenes y las entidades
+ * en milímetros reales. La orientación solo cambia el tamaño de la página: las coordenadas no se transforman.
+ */
+export async function createA4Pdf(entities, margins, { grid = true, orientation = 'portrait' } = {}) {
+  const sheet = sheetFor(orientation);
+  const SHEET_WIDTH_MM = sheet.w;
+  const SHEET_HEIGHT_MM = sheet.h;
   const pdf = await PDFDocument.create();
   const pageWidth = toPoints(SHEET_WIDTH_MM);
   const pageHeight = toPoints(SHEET_HEIGHT_MM);

@@ -8,6 +8,12 @@
 
 export const SHEET_W = 210;
 export const SHEET_H = 297;
+/** Hoja vertical por defecto. La orientación horizontal intercambia ancho y alto; la geometría no cambia. */
+export const A4_PORTRAIT = Object.freeze({ w: SHEET_W, h: SHEET_H });
+export const A4_LANDSCAPE = Object.freeze({ w: SHEET_H, h: SHEET_W });
+export function sheetFor(orientation) {
+  return orientation === 'landscape' ? A4_LANDSCAPE : A4_PORTRAIT;
+}
 const DEG = Math.PI / 180;
 
 /** Tolerancia máxima (mm) entre la curva real y su aproximación poligonal al dibujar arcos/circunferencias. */
@@ -161,10 +167,10 @@ export function findStrokeAt(p, strokes, tolMm, filter) {
   return best ? best.stroke : null;
 }
 
-export function pointsInsideSheet(points, eps = 1e-9) {
+export function pointsInsideSheet(points, eps = 1e-9, sheet = A4_PORTRAIT) {
   return points.every(
     (p) => Number.isFinite(p.x) && Number.isFinite(p.y) &&
-      p.x >= -eps && p.x <= SHEET_W + eps && p.y >= -eps && p.y <= SHEET_H + eps,
+      p.x >= -eps && p.x <= sheet.w + eps && p.y >= -eps && p.y <= sheet.h + eps,
   );
 }
 

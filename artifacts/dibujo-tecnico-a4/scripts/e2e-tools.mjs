@@ -20,10 +20,38 @@ const ok = (c, m) => { checks += 1; assert.ok(c, m); };
 const near = (a, b, eps, m) => ok(Math.abs(a - b) <= eps, `${m}: ${a} ≠ ${b} (±${eps})`);
 const log = (m) => console.log(`  ✓ ${m}`);
 
-async function fresh(storage = null) {
+const ORIGIN_FILE = new URL('robots.txt', URL_APP).href;
+/** Borra IndexedDB y localStorage desde un archivo estático del mismo origen (la app no está abierta). */
+async function wipe(storage = null) {
+  await page.goto(ORIGIN_FILE);
+  await page.evaluate(async (s) => {
+    localStorage.clear();
+    await new Promise((r) => { const q = indexedDB.deleteDatabase('dibujo-tecnico-a4'); q.onsuccess = q.onerror = q.onblocked = () => r(); });
+    if (s) for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v);
+  }, storage);
+}
+/** Estado limpio. open: 'new' crea un proyecto vacío; 'legacy' abre el migrado; null se queda en la biblioteca. */
+async function fresh(storage = null, { open = storage ? 'legacy' : 'new', orientation = 'portrait' } = {}) {
+  await wipe(storage);
   await page.goto(URL_APP);
-  await page.evaluate((s) => { localStorage.clear(); if (s) for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v); }, storage);
+  await page.waitForSelector('[data-testid=library]');
+  if (open === 'new') {
+    await page.click('[data-testid=button-new-project]');
+    if (orientation === 'landscape') await page.click('[data-testid=seg-new-orientation-landscape]');
+    await page.click('[data-testid=button-create-project]');
+  } else if (open === 'legacy') {
+    await page.click('[data-testid=open-migrado-localstorage]');
+  }
+  if (open) await afterOpen();
+}
+/** Recarga la app y reabre el primer proyecto de la biblioteca. */
+async function reloadAndReopen() {
   await page.reload();
+  await page.waitForSelector('[data-testid=library-all]');
+  await page.locator('[data-testid=library-all] .lib-open').first().click();
+  await afterOpen();
+}
+async function afterOpen() {
   await page.waitForSelector('[data-testid=drawing-sheet]');
   // Registro de las coordenadas reales que recibe el navegador (para comprobar que no se redondean).
   await page.evaluate(() => {
@@ -33,6 +61,25 @@ async function fresh(storage = null) {
     svg.addEventListener('pointerup', (e) => window.__ups.push({ x: e.clientX, y: e.clientY, t: e.pointerType }), true);
   });
 }
+/** Proyecto abierto tal como está GUARDADO en IndexedDB (desempaquetado). */
+const readProject = () => page.evaluate(async () => {
+  const id = document.querySelector('[data-project-id]')?.dataset.projectId;
+  const db = await new Promise((res, rej) => { const r = indexedDB.open('dibujo-tecnico-a4'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const raw = await new Promise((res) => { const q = db.transaction('projects').objectStore('projects').get(id); q.onsuccess = () => res(q.result); q.onerror = () => res(null); });
+  db.close();
+  const unpack = (e) => {
+    if (e.type !== 'polyline' || !Array.isArray(e.xy)) return e;
+    const points = [];
+    for (let i = 0; i + 1 < e.xy.length; i += 2) { const p = { x: e.xy[i], y: e.xy[i + 1] }; const pr = Array.isArray(e.p) ? e.p[i / 2] : null; if (Number.isFinite(pr)) p.p = pr; points.push(p); }
+    const { xy, p, ...rest } = e; return { ...rest, points };
+  };
+  return raw ? { ...raw, entities: raw.entities.map(unpack) } : null;
+});
+/** Espera a que el indicador diga «Guardado» (escritura confirmada). */
+async function waitSaved() {
+  await page.waitForTimeout(80);
+  await page.waitForFunction(() => document.querySelector('[data-testid=status-autosave]')?.dataset.status === 'saved', null, { timeout: 10000 });
+}
 const view = () => page.evaluate(() => {
   const svg = document.querySelector('[data-testid=drawing-sheet]');
   const r = svg.getBoundingClientRect();
@@ -40,7 +87,7 @@ const view = () => page.evaluate(() => {
 });
 const toClient = async (x, y) => { const v = await view(); return { x: v.left + v.tx + x * v.scale, y: v.top + v.ty + y * v.scale }; };
 const clientToDoc = (v, c) => ({ x: (c.x - v.left - v.tx) / v.scale, y: (c.y - v.top - v.ty) / v.scale });
-const entities = async () => { await page.waitForTimeout(550); return page.evaluate(() => JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).entities); };
+const entities = async () => { await waitSaved(); return (await readProject()).entities; };
 const pen = (type, p, buttons = 1) => cdp.send('Input.dispatchMouseEvent', { type, x: p.x, y: p.y, button: buttons || type !== 'mouseMoved' ? 'left' : 'none', buttons, clickCount: 1, pointerType: 'pen', force: 0.5 });
 async function penTap(x, y) { const p = await toClient(x, y); await pen('mouseMoved', p, 0); await pen('mousePressed', p); await pen('mouseReleased', p, 0); await page.waitForTimeout(30); return p; }
 async function penDrag(from, to, steps = 12) {
@@ -232,14 +279,17 @@ const v1 = JSON.stringify({ strokes: [
   { id: 'c1', kind: 'circle', color: '#244d58', width: 0.45, points: [{ x: 0, y: 0 }, { x: 1, y: 1 }], meta: { center: { x: 100, y: 150 }, radius: 35.11, startDeg: 19.98, sweepDeg: 360 } },
   { id: 'f1', kind: 'free', color: '#252b2d', width: 0.6, points: [{ x: 5, y: 5, p: 0.5 }, { x: 9, y: 7, p: 0.5 }] },
 ], margins: { top: 10, right: 10, bottom: 10, left: 10 }, color: '#244d58', width: 0.45 });
-await fresh({ 'dibujo-tecnico-a4-v1': v1 });
-ok(await page.locator('[data-testid=text-load-notice]').isVisible(), 'aviso de conversión visible');
+await fresh({ 'dibujo-tecnico-a4-v1': v1 }, { open: null });
+ok(await page.locator('[data-testid=startup-notice]').first().isVisible(), 'aviso de conversión visible en la biblioteca');
+await page.click('[data-testid=open-migrado-localstorage]'); await afterOpen();
 ents = await entities();
 ok(ents.length === 3 && ents[0].type === 'segment' && ents[0].b.x === 60.125 && ents[1].type === 'circle' && ents[1].r === 35.11 && ents[2].type === 'polyline', 'v1 migrado con valores exactos');
 ok(await page.evaluate(() => localStorage.getItem('dibujo-tecnico-a4-v1') !== null), 'la copia v1 se conserva');
-await page.reload(); await page.waitForSelector('[data-testid=drawing-sheet]');
-ok((await entities()).length === 3 && !(await page.locator('[data-testid=text-load-notice]').isVisible()), 'tras recargar se lee el v2 guardado');
-log('migración v1 → v2 sin pérdidas; v1 conservado como copia');
+await page.reload(); await page.waitForSelector('[data-testid=library]');
+ok((await page.locator('[data-testid=library-all] article').count()) === 1 && (await page.locator('[data-testid=startup-notice]').count()) === 0, 'tras recargar: un solo proyecto y sin nuevo aviso');
+await page.click('[data-testid=open-migrado-localstorage]'); await afterOpen();
+ok((await entities()).length === 3, 'el proyecto migrado se reabre intacto');
+log('migración v1 → biblioteca sin pérdidas ni duplicados; v1 conservado');
 
 // ───────── 8) Exportación ─────────
 await page.click('[data-testid=button-export]');
@@ -259,9 +309,9 @@ log('exportación PDF y PNG');
     { id: 'c', type: 'circle', color: '#244d58', width: 0.45, c: { x: 105.000000001, y: 148.5 }, r: 33.333333333333 },
     { id: 'a', type: 'arc', color: '#244d58', width: 0.45, c: { x: 60, y: 220 }, r: 17.77777, start: 12.3456789, sweep: 200.123456 } ] };
   await fresh({ 'dibujo-tecnico-a4-v2': JSON.stringify(docA) });
-  await page.waitForTimeout(550); // primer guardado automático (reescribe el JSON con su orden de claves)
-  const rawBefore = await page.evaluate(() => localStorage.getItem('dibujo-tecnico-a4-v2'));
-  assert.deepEqual(JSON.parse(rawBefore).entities, docA.entities); checks += 1;
+  await waitSaved();
+  const rawBefore = JSON.stringify((await readProject()).entities);
+  assert.deepEqual(JSON.parse(rawBefore), docA.entities); checks += 1;
   for (let i = 0; i < 3; i += 1) await page.click('[data-testid=button-zoom-in]');
   await page.mouse.move(700, 400); await page.keyboard.down('Control'); await page.mouse.wheel(0, -300); await page.keyboard.up('Control');
   await page.mouse.wheel(120, 80);
@@ -270,8 +320,9 @@ log('exportación PDF y PNG');
   await touch('touchEnd', []);
   await touch('touchStart', [{ x: 900, y: 500, id: 3 }]); await touch('touchMove', [{ x: 840, y: 460, id: 3 }]); await touch('touchEnd', []);
   await page.click('[data-testid=button-fit]');
-  await page.waitForTimeout(550);
-  ok(rawBefore === await page.evaluate(() => localStorage.getItem('dibujo-tecnico-a4-v2')), 'zoom, rueda, pellizco y desplazamiento no cambian ni un bit de lo guardado');
+  await page.waitForTimeout(1800);
+  ok((await page.locator('[data-testid=status-autosave]').getAttribute('data-status')) === 'saved', 'la navegación no deja cambios pendientes');
+  ok(rawBefore === JSON.stringify((await readProject()).entities), 'zoom, rueda, pellizco y desplazamiento no cambian ni un bit de lo guardado');
   ok(await page.locator('[data-testid=button-undo]').isDisabled(), 'la navegación no crea pasos de deshacer');
   log('navegación: coordenadas guardadas idénticas bit a bit');
 }
@@ -368,24 +419,24 @@ async function penJitter(x, y, dxPx) {
     await touch('touchEnd', []);
   };
   await fingerStroke();
-  let list = await page.evaluate(async () => { await new Promise((r) => setTimeout(r, 550)); return JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).entities; });
+  let list = await entities();
   ok(list.length === 0, 'automático sin lápiz detectado: el primer toque del dedo no dibuja');
   ok(await page.locator('[data-testid=finger-prompt]').isVisible(), 'se ofrece dibujar con el dedo');
   await page.click('[data-testid=button-finger-draw]');
   await fingerStroke();
   ok((await entities()).length === 1, 'tras elegirlo, el dedo dibuja');
-  await page.reload(); await page.waitForSelector('[data-testid=drawing-sheet]');
+  await reloadAndReopen();
   ok(await page.locator('[data-testid=seg-finger-mode-all]').getAttribute('class') === 'on', '«Dedo dibuja» se conserva tras recargar');
   // Detección del lápiz: se activa con un sobrevuelo, persiste y se puede olvidar.
   await fresh();
   ok((await page.locator('[data-testid=text-pen-detected]').innerText()).includes('aún no'), 'estado inicial: lápiz no detectado');
   const hp = await toClient(100, 100); await pen('mouseMoved', hp, 0); await pen('mouseMoved', { x: hp.x + 5, y: hp.y }, 0);
   await page.waitForTimeout(100);
-  await page.reload(); await page.waitForSelector('[data-testid=drawing-sheet]');
+  await reloadAndReopen();
   ok((await page.locator('[data-testid=text-pen-detected]').innerText()).includes('S Pen detectado'), 'la detección (por sobrevuelo) persiste tras recargar');
   await page.click('[data-testid=tool-pen]');
   await fingerStroke();
-  ok(!(await page.locator('[data-testid=finger-prompt]').isVisible()) && (await page.evaluate(async () => { await new Promise((r) => setTimeout(r, 550)); return JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).entities.length; })) === 0, 'con lápiz detectado, el dedo navega y no se pregunta');
+  ok(!(await page.locator('[data-testid=finger-prompt]').isVisible()) && (await entities()).length === 0, 'con lápiz detectado, el dedo navega y no se pregunta');
   await page.click('[data-testid=button-forget-pen]');
   ok((await page.locator('[data-testid=text-pen-detected]').innerText()).includes('aún no'), '«Olvidar» vuelve al estado inicial seguro');
   log('G3: el dedo no dibuja hasta elegirlo; la elección y la detección del lápiz persisten; «Olvidar» funciona');
@@ -400,14 +451,14 @@ async function penJitter(x, y, dxPx) {
   await field.press('Enter');
   const right = page.locator('[data-testid=input-margin-right]');
   await right.click(); await right.fill(''); await right.pressSequentially('12,5'); await right.press('Enter');
-  await page.waitForTimeout(550);
-  let m = await page.evaluate(() => JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).margins);
+  await waitSaved();
+  let m = (await readProject()).sheet.margins;
   ok(m.left === 12.5 && m.right === 12.5, `«12.5» y «12,5» se guardan como 12,5 mm (${m.left}, ${m.right})`);
   const top = page.locator('[data-testid=input-margin-top]');
   await top.click(); await top.fill(''); await top.pressSequentially('50'); await top.press('Enter');
   ok(await page.locator('[data-testid=input-margin-top-error]').isVisible(), 'fuera de 0–40 mm muestra un error');
-  await page.waitForTimeout(550);
-  m = await page.evaluate(() => JSON.parse(localStorage.getItem('dibujo-tecnico-a4-v2')).margins);
+  await waitSaved();
+  m = (await readProject()).sheet.margins;
   ok(m.top === 10 && await top.inputValue() === '10', 'el valor no válido no se aplica y se recupera el anterior');
   const marginRect = await page.evaluate(() => [...document.querySelectorAll('[data-testid=drawing-sheet] rect')].find((r) => r.getAttribute('stroke-dasharray'))?.getAttribute('x'));
   ok(marginRect === '12.5', 'la guía de márgenes usa 12,5 mm');

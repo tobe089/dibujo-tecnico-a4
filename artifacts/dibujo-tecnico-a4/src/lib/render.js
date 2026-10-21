@@ -1,7 +1,7 @@
 // Representación SVG de las entidades. La usan la pantalla, el PNG y la impresión, para que todo coincida.
 // Los arcos y círculos se dibujan con el comando de arco de SVG (curva exacta), no con polilíneas.
 
-import { pointAt } from './geometry.js';
+import { A4_PORTRAIT, pointAt } from './geometry.js';
 
 /** Número para SVG: 6 decimales de mm (1 nm) sin ceros sobrantes. */
 export const n = (v) => String(Number(v.toFixed(6)));
@@ -41,14 +41,15 @@ export const gridStyle = { color: GRID_COLOR, weight: GRID_WEIGHT };
 
 const esc = (s) => String(s).replace(/[^#0-9a-fA-F]/g, '');
 
-/** SVG autónomo de la hoja A4 (210 × 297 mm) para exportar o imprimir. */
-export function buildSheetSvg(entities, margins, { grid = true } = {}) {
+/** SVG autónomo de la hoja A4 (vertical 210 × 297 mm u horizontal 297 × 210 mm) para exportar o imprimir. */
+export function buildSheetSvg(entities, margins, { grid = true, sheet = A4_PORTRAIT } = {}) {
+  const W = sheet.w, H = sheet.h;
   const parts = [];
-  parts.push('<rect x="0" y="0" width="210" height="297" fill="#ffffff"/>');
+  parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>`);
   if (grid) {
-    for (let i = 0; i <= 210; i += 1) parts.push(`<line x1="${i}" y1="0" x2="${i}" y2="297" stroke="${GRID_COLOR(i)}" stroke-width="${GRID_WEIGHT(i)}"/>`);
-    for (let i = 0; i <= 297; i += 1) parts.push(`<line x1="0" y1="${i}" x2="210" y2="${i}" stroke="${GRID_COLOR(i)}" stroke-width="${GRID_WEIGHT(i)}"/>`);
-    const w = Math.max(0, 210 - margins.left - margins.right), h = Math.max(0, 297 - margins.top - margins.bottom);
+    for (let i = 0; i <= W; i += 1) parts.push(`<line x1="${i}" y1="0" x2="${i}" y2="${H}" stroke="${GRID_COLOR(i)}" stroke-width="${GRID_WEIGHT(i)}"/>`);
+    for (let i = 0; i <= H; i += 1) parts.push(`<line x1="0" y1="${i}" x2="${W}" y2="${i}" stroke="${GRID_COLOR(i)}" stroke-width="${GRID_WEIGHT(i)}"/>`);
+    const w = Math.max(0, W - margins.left - margins.right), h = Math.max(0, H - margins.top - margins.bottom);
     parts.push(`<rect x="${margins.left}" y="${margins.top}" width="${w}" height="${h}" fill="none" stroke="#85b8a6" stroke-width="0.22" stroke-dasharray="1.3 1.1"/>`);
   }
   for (const e of entities) {
@@ -56,5 +57,5 @@ export function buildSheetSvg(entities, margins, { grid = true } = {}) {
     if (e.type === 'point') parts.push(`<path d="${d}" fill="${esc(e.color)}" stroke="none"/>`);
     else parts.push(`<path d="${d}" fill="none" stroke="${esc(e.color)}" stroke-width="${n(e.width)}" stroke-linecap="round" stroke-linejoin="round"/>`);
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297"><defs><clipPath id="hoja"><rect x="0" y="0" width="210" height="297"/></clipPath></defs><g clip-path="url(#hoja)">${parts.join('')}</g></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}"><defs><clipPath id="hoja"><rect x="0" y="0" width="${W}" height="${H}"/></clipPath></defs><g clip-path="url(#hoja)">${parts.join('')}</g></svg>`;
 }

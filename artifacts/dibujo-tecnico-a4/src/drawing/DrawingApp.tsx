@@ -1,17 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import {
-  Check, Circle, Compass, Download, Dot, Equal, Eraser, FileDown, Hand, MousePointer2, Pencil, Plus, Redo2, Ruler,
-  Settings2, Trash2, Triangle, Undo2, ZoomIn, ZoomOut,
+  Check, Circle, Compass, Download, Dot, Equal, Eraser, FileDown, FolderOpen, Hand, MousePointer2, Pencil, Plus, Redo2, Ruler,
+  Save, Settings2, Trash2, Triangle, Undo2, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { createA4Pdf } from '@/lib/pdf-export.js';
 import {
-  angleConstruction, arcPoints, normalizeDeg, offsetLine, pointAt, relatedLine, segmentAngle, segmentLength, sweepBetween,
+  angleConstruction, arcPoints, normalizeDeg, offsetLine, pointAt, relatedLine, segmentAngle, segmentLength, sheetFor, sweepBetween,
+  type Orientation, type Sheet,
 } from '@/lib/geometry.js';
 import {
-  STORAGE_KEY_V2, commitHistory, createHistory, entityInsideSheet, hitTest, loadFromStorage, makeId, pointInsideSheet,
-  redoHistory, removeEntities, sanitizeEntity, serializeDocument, undoHistory, updateEntity,
-  type Doc, type Entity, type EntityPatch, type History, type Margins, type Pt,
+  commitHistory, createHistory, entityInsideSheet, hitTest, makeId, pointInsideSheet,
+  redoHistory, removeEntities, sanitizeEntity, undoHistory, updateEntity,
+  type Entity, type EntityPatch, type History, type Margins, type Pt,
 } from '@/lib/document.js';
+import { createProject, entitiesOutsideSheet, filterSelection, projectToJson, type Project } from '@/lib/project.js';
+import type { Store } from '@/lib/storage.js';
+import { createSaveManager, type SaveManager, type SaveStatus } from '@/lib/save-manager.js';
+import { clearJournal, writeJournal } from '@/lib/journal.js';
+import { makeThumbnail, projectChannel } from './project-io';
 import { eraseWithCapsule } from '@/lib/erase.js';
 import { buildSheetSvg, entityPathD, gridStyle, n, pointRadius } from '@/lib/render.js';
 import { MAX_SCALE, MIN_SCALE, fitView, panBy, pinchView, screenToDoc, viewBoxFor, zoomAt, type View } from '@/lib/view.js';
@@ -21,6 +27,12 @@ import {
 } from '@/lib/pointer-policy.js';
 import { EntityEditor } from './EntityEditor';
 import { ExactField, NumField, Seg, Toggle, fmtNum, toNum } from './fields';
+
+/** La calibración física y el botón 1:1 en pantalla quedan fuera de la primera versión: se ocultan, no se borran. */
+const SHOW_PHYSICAL_SCALE = false;
+const SAVE_LABEL: Record<SaveStatus['status'], string> = {
+  saved: 'Guardado', dirty: 'Cambios sin guardar', saving: 'Guardando…', error: 'Error al guardar', conflict: 'Conflicto: sin guardar',
+};
 
 type Tool = 'pen' | 'point' | 'ruler' | 'compass' | 'protractor' | 'parallel' | 'perpendicular' | 'eraser' | 'select' | 'pan';
 type Placement = 'start' | 'center' | 'foot';
@@ -41,6 +53,8 @@ type Gesture = {
   startScreen: Pt; startDoc: Pt; curDoc: Pt; moved: boolean;
   points: (Pt & { p?: number })[];
   eraseR: number; working: Entity[] | null; lastErase: Pt | null;
+  /** Posiciones del borrador (mm) para pintar la estela; el resultado exacto está en `working`. */
+  trail: Pt[];
 };
 
 const PREFS_KEY = 'dibujo-tecnico-a4-prefs-v2';
@@ -71,29 +85,40 @@ function loadCalib(): Calib | null {
   } catch { /* sin calibración válida */ }
   return null;
 }
-function loadInitial() {
-  try { return loadFromStorage(localStorage); } catch { return null; }
-}
 const pt = (p: Pt): Pt => ({ x: p.x, y: p.y });
 
-export function DrawingApp() {
-  const [initial] = useState(loadInitial);
-  const [history, setHistory] = useState<History<Entity[]>>(() => createHistory(initial?.doc.entities ?? []));
-  const [meta, setMeta] = useState<Meta>(() => ({
-    margins: initial?.doc.margins ?? { top: 10, right: 10, bottom: 10, left: 10 },
-    color: initial?.doc.color ?? '#244d58', width: initial?.doc.width ?? 0.45,
-  }));
-  const [loadNotice, setLoadNotice] = useState(() => (initial?.migrated
-    ? `Se convirtió tu dibujo anterior al formato editable (${initial.doc.entities.length} elementos${initial.dropped ? `, ${initial.dropped} ilegibles` : ''}). La copia original sigue guardada.`
-    : initial === null ? 'No se pudo leer el almacenamiento local de este navegador.' : ''));
+/** Una entidad dibujada. Solo se vuelve a generar su trazado si la entidad cambia (las entidades son inmutables). */
+const EntityPath = memo(function EntityPath({ entity: e }: { entity: Entity }) {
+  return e.type === 'point'
+    ? <path d={entityPathD(e)} fill={e.color} data-testid={`entity-${e.id}`} data-type={e.type} />
+    : <path d={entityPathD(e)} fill="none" stroke={e.color} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" data-testid={`entity-${e.id}`} data-type={e.type} />;
+});
+
+const SheetGrid = memo(function SheetGrid({ sheet }: { sheet: Sheet }) {
+  return <>
+    {Array.from({ length: sheet.w + 1 }, (_, i) => <line key={`x-${i}`} x1={i} y1="0" x2={i} y2={sheet.h} stroke={gridStyle.color(i)} strokeWidth={gridStyle.weight(i)} />)}
+    {Array.from({ length: sheet.h + 1 }, (_, i) => <line key={`y-${i}`} x1="0" y1={i} x2={sheet.w} y2={i} stroke={gridStyle.color(i)} strokeWidth={gridStyle.weight(i)} />)}
+  </>;
+});
+
+export function DrawingApp({ store, project, onExit, onOpenProject }: {
+  store: Store; project: Project; onExit: () => void; onOpenProject: (id: string) => void;
+}) {
+  const [history, setHistory] = useState<History<Entity[]>>(() => createHistory(project.entities));
+  const [meta, setMeta] = useState<Meta>(() => ({ margins: project.sheet.margins, color: project.style.color, width: project.style.width }));
+  const [orientation, setOrientation] = useState<Orientation>(project.sheet.orientation);
+  const sheet = sheetFor(orientation);
   const entities = history.present;
-  const [tool, setTool] = useState<Tool>('pen');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const restoredSelection = useMemo(() => filterSelection(project.selection, project.entities), [project]);
+  const [tool, setTool] = useState<Tool>(restoredSelection.length ? 'select' : 'pen');
+  const [selectedId, setSelectedId] = useState<string | null>(restoredSelection[0] ?? null);
   const [lastCreatedId, setLastCreatedId] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(true);
-  const [saveError, setSaveError] = useState(false);
+  const [saveState, setSaveState] = useState<SaveStatus>({ status: 'saved', message: '' });
+  const [leaving, setLeaving] = useState(false);
   const [stageSize, setStageSize] = useState<{ width: number; height: number } | null>(null);
+  const stageSizeRef = useRef(stageSize);
+  stageSizeRef.current = stageSize;
   const [view, setViewState] = useState<View>({ scale: 2, tx: 0, ty: 0 });
   const viewRef = useRef(view);
   const setView = useCallback((next: View | ((v: View) => View)) => {
@@ -101,7 +126,7 @@ export function DrawingApp() {
     viewRef.current = value;
     setViewState(value);
   }, []);
-  const [modal, setModal] = useState<'clear' | 'export' | 'calibrate' | null>(null);
+  const [modal, setModal] = useState<'clear' | 'export' | 'calibrate' | 'leave' | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [exportGrid, setExportGrid] = useState(true);
   const [printSvg, setPrintSvg] = useState('');
@@ -160,6 +185,8 @@ export function DrawingApp() {
   const fittedRef = useRef(false);
   const entitiesRef = useRef(entities);
   entitiesRef.current = entities;
+  const sheetRef = useRef(sheet);
+  sheetRef.current = sheet;
 
   useEffect(() => { policyRef.current.fingerMode = prefs.fingerMode; }, [prefs.fingerMode]);
 
@@ -170,14 +197,23 @@ export function DrawingApp() {
     const observer = new ResizeObserver(([entry]) => {
       const size = { width: Math.round(entry.contentRect.width), height: Math.round(entry.contentRect.height) };
       setStageSize(size);
-      if (!fittedRef.current && size.width > 0 && size.height > 0) { fittedRef.current = true; setView(fitView(size.width, size.height)); }
+      if (!fittedRef.current && size.width > 0 && size.height > 0) {
+        fittedRef.current = true;
+        const base = fitView(size.width, size.height, 24, sheetRef.current);
+        const saved = project.view;
+        // Vista guardada: centro (mm) y zoom relativo al encaje; no afecta a la geometría.
+        if (saved) {
+          const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, base.scale * saved.zoom));
+          setView({ scale, tx: size.width / 2 - saved.center.x * scale, ty: size.height / 2 - saved.center.y * scale });
+        } else setView(base);
+      }
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [setView]);
-  const fit = useCallback(() => { if (stageSize) setView(fitView(stageSize.width, stageSize.height)); }, [stageSize, setView]);
+  }, [setView, project]);
+  const fit = useCallback(() => { if (stageSize) setView(fitView(stageSize.width, stageSize.height, 24, sheet)); }, [stageSize, setView, sheet]);
   const zoomCentered = (factor: number) => { if (stageSize) setView(v => zoomAt(v, stageSize.width / 2, stageSize.height / 2, factor)); };
-  const fitScale = stageSize ? fitView(stageSize.width, stageSize.height).scale : view.scale;
+  const fitScale = stageSize ? fitView(stageSize.width, stageSize.height, 24, sheet).scale : view.scale;
 
   useEffect(() => {
     const node = svgRef.current;
@@ -192,18 +228,129 @@ export function DrawingApp() {
     return () => node.removeEventListener('wheel', onWheel);
   }, [setView, stageSize]);
 
-  // ── Guardado local ──
+  // ── Guardado en la biblioteca (IndexedDB) ──
+  // El proyecto que se guarda se construye en el momento de escribir, con el estado más reciente.
+  const revisionRef = useRef(project.revision);
+  const latest = useRef({ entities, meta, orientation, selectedId });
+  latest.current = { entities, meta, orientation, selectedId };
+  const snapshot = useCallback((): Project => {
+    const cur = latest.current;
+    const v = viewRef.current;
+    const size = stageSizeRef.current;
+    let savedView = project.view;
+    if (size) {
+      const base = fitView(size.width, size.height, 24, sheetFor(cur.orientation));
+      savedView = { center: screenToDoc(v, size.width / 2, size.height / 2), zoom: v.scale / base.scale, rotation: 0 };
+    }
+    return {
+      ...project, revision: revisionRef.current, entities: cur.entities,
+      sheet: { ...project.sheet, orientation: cur.orientation, margins: cur.meta.margins },
+      style: { color: cur.meta.color, width: cur.meta.width },
+      view: savedView, selection: cur.selectedId ? filterSelection([cur.selectedId], cur.entities) : [],
+    };
+  }, [project]);
+  const managerRef = useRef<SaveManager | null>(null);
+  const channelRef = useRef<BroadcastChannel | null>(null);
+  const tabId = useMemo(() => makeId(), []);
   useEffect(() => {
-    setSaved(false);
-    const timer = window.setTimeout(() => {
-      try {
-        const doc: Doc = { version: 2, entities, margins: meta.margins, color: meta.color, width: meta.width };
-        localStorage.setItem(STORAGE_KEY_V2, serializeDocument(doc));
-        setSaved(true); setSaveError(false);
-      } catch { setSaveError(true); }
-    }, 450);
-    return () => window.clearTimeout(timer);
-  }, [entities, meta]);
+    const manager = createSaveManager({
+      write: async () => {
+        const snap = snapshot();
+        const res = await store.save(snap, revisionRef.current);
+        revisionRef.current = res.revision;
+        lastSavedView.current = JSON.stringify(snap.view);
+        channelRef.current?.postMessage({ type: 'saved', id: project.id, revision: res.revision, tab: tabId });
+      },
+      onStatus: (st) => {
+        setSaveState(st);
+        if (st.status === 'saved') { try { clearJournal(localStorage, project.id); } catch { /* sin localStorage */ } }
+      },
+    });
+    managerRef.current = manager;
+    return () => { manager.dispose(); managerRef.current = null; };
+  }, [store, project.id, snapshot, tabId]);
+  // Cada operación terminada (geometría, hoja, márgenes, estilo o selección) programa el guardado.
+  const firstChange = useRef(true);
+  useEffect(() => {
+    if (firstChange.current) { firstChange.current = false; return; }
+    managerRef.current?.changed();
+  }, [entities, meta, orientation, selectedId]);
+  // La vista (centro y zoom) no es geometría: no marca cambios, pero se guarda al salir si cambió.
+  const lastSavedView = useRef(JSON.stringify(project.view));
+  // Otras pestañas: si guardan este proyecto, se recarga (sin cambios aquí) o se marca el conflicto (con cambios).
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const ch = projectChannel();
+    channelRef.current = ch;
+    ch.onmessage = async (ev) => {
+      const msg = ev.data;
+      if (!msg || msg.id !== project.id || msg.tab === tabId) return;
+      if (msg.type === 'deleted') { managerRef.current?.markConflict('El proyecto se ha eliminado en otra pestaña o ventana.'); return; }
+      if (msg.type !== 'saved' || msg.revision <= revisionRef.current) return;
+      const m = managerRef.current;
+      if (m && (m.isDirty() || m.isSaving())) { m.markConflict('El proyecto se modificó en otra pestaña o ventana.'); return; }
+      try { await reloadFromStore('Se actualizó con los cambios guardados en otra pestaña.'); } catch { /* se informará al guardar */ }
+    };
+    return () => { ch.close(); channelRef.current = null; };
+  }, [project.id, tabId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Al ocultarse o cerrarse la página: copia síncrona (localStorage) + intento de guardar en IndexedDB.
+  useEffect(() => {
+    const onHide = () => {
+      const m = managerRef.current;
+      if (!m || (!m.isDirty() && !m.isSaving())) return;
+      if (m.getState().status === 'conflict') return; // no se reescribe nada en conflicto
+      try { writeJournal(localStorage, { project: snapshot(), baseRevision: revisionRef.current }); } catch { /* sin localStorage */ }
+      void m.flush();
+    };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') onHide(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onHide);
+    return () => { document.removeEventListener('visibilitychange', onVisibility); window.removeEventListener('pagehide', onHide); };
+  }, [snapshot]);
+  const reloadFromStore = async (message: string) => {
+    const fresh = await store.load(project.id);
+    revisionRef.current = fresh.revision;
+    gestureRef.current = null;
+    setHistory(createHistory(fresh.entities));
+    setMeta({ margins: fresh.sheet.margins, color: fresh.style.color, width: fresh.style.width });
+    setOrientation(fresh.sheet.orientation);
+    setSelectedId(null); setLastCreatedId(null);
+    firstChange.current = true;
+    managerRef.current?.resetClean();
+    setNotice(message);
+  };
+  const saveNow = async () => { await managerRef.current?.flush(); void refreshThumbnail(); };
+  const refreshThumbnail = async () => {
+    try { await store.setThumbnail(project.id, await makeThumbnail(latest.current.entities, sheetFor(latest.current.orientation))); } catch { /* la miniatura no es crítica */ }
+  };
+  const exitToLibrary = async () => {
+    setLeaving(true);
+    const m = managerRef.current;
+    if (m && m.getState().status === 'saved' && JSON.stringify(snapshot().view) !== lastSavedView.current) m.changed();
+    await m?.flush();
+    const st = managerRef.current?.getState().status;
+    if (st === 'saved') { await refreshThumbnail(); onExit(); return; }
+    setLeaving(false);
+    setModal('leave');
+  };
+  const saveAsCopy = async () => {
+    const copy = { ...createProject({ name: `${project.name} (copia)`, orientation: latest.current.orientation }), entities: latest.current.entities };
+    copy.sheet.margins = latest.current.meta.margins;
+    copy.style = { color: latest.current.meta.color, width: latest.current.meta.width };
+    try {
+      await store.create(copy, { thumbnail: await makeThumbnail(copy.entities, sheetFor(copy.sheet.orientation)).catch(() => null) });
+      managerRef.current?.resetClean();
+      onOpenProject(copy.id);
+    } catch (e) { setNotice(`No se pudo crear la copia: ${(e as Error).message}`); }
+  };
+  const exportJson = () => download(new Blob([projectToJson(snapshot())], { type: 'application/json' }), `${project.name.replace(/[^\p{L}\p{N} _.-]/gu, '_') || 'proyecto'}.dta4.json`);
+  const changeOrientation = (next: Orientation) => {
+    if (next === orientation) return;
+    const outside = entitiesOutsideSheet(entities, next);
+    setOrientation(next);
+    setNotice(outside ? `${outside} elemento(s) quedan fuera de la hoja ${next === 'landscape' ? 'horizontal' : 'vertical'}. No se han movido ni deformado.` : '');
+    if (stageSize) setView(fitView(stageSize.width, stageSize.height, 24, sheetFor(next)));
+  };
   useEffect(() => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* no crítico */ } }, [prefs]);
   /** Recuerda (también tras recargar) que este navegador ha recibido eventos de un S Pen. */
   const markPenDetected = () => {
@@ -255,7 +402,7 @@ export function DrawingApp() {
     for (const draft of drafts) {
       const e = sanitizeEntity({ ...draft, id: makeId(), color: meta.color, width: meta.width });
       if (!e) return 'Valores no válidos.';
-      if (e.type !== 'polyline' && !entityInsideSheet(e)) return 'Queda fuera de la hoja A4. Ajusta los valores.';
+      if (e.type !== 'polyline' && !entityInsideSheet(e, 1e-9, sheet)) return 'Queda fuera de la hoja A4. Ajusta los valores.';
       made.push(e);
     }
     if (!made.length) return null;
@@ -311,7 +458,7 @@ export function DrawingApp() {
     const g: Gesture = {
       id, pointerType, tool, startScreen: s, startDoc: d, curDoc: d, moved: false,
       points: [pointerType === 'pen' ? { ...d, p: pressure } : d],
-      eraseR: prefs.eraserPx / viewRef.current.scale, working: null, lastErase: null,
+      eraseR: prefs.eraserPx / viewRef.current.scale, working: null, lastErase: null, trail: [d],
     };
     if (tool === 'eraser') {
       g.working = eraseWithCapsule(entitiesRef.current, d, d, g.eraseR, { mode: prefs.eraserMode });
@@ -330,6 +477,7 @@ export function DrawingApp() {
       if (g.tool === 'eraser' && g.working && g.lastErase) {
         g.working = eraseWithCapsule(g.working, g.lastErase, d, g.eraseR, { mode: prefs.eraserMode });
         g.lastErase = d;
+        g.trail.push(d);
       }
     }
     setTick(t => t + 1);
@@ -341,7 +489,7 @@ export function DrawingApp() {
     setTick(t => t + 1);
     const tap = g.startDoc;
     const end = g.moved ? g.curDoc : g.startDoc;
-    const outside = (p: Pt) => { if (!pointInsideSheet(p)) { setNotice('Ese punto está fuera de la hoja A4.'); return true; } return false; };
+    const outside = (p: Pt) => { if (!pointInsideSheet(p, sheet)) { setNotice('Ese punto está fuera de la hoja A4.'); return true; } return false; };
     switch (g.tool) {
       case 'pen':
         createEntities([{ type: 'polyline', points: g.points } as Draft]);
@@ -507,7 +655,7 @@ export function DrawingApp() {
       if (protBaseRay) list.push({ type: 'segment', a: protVertex, b: c.baseEnd } as Draft);
       list.push({ type: 'segment', a: protVertex, b: c.rayEnd } as Draft);
       if (protMark) list.push({ type: 'arc', c: protVertex, r: markRadius, start: c.arcStartDeg, sweep: c.sweepDeg } as Draft);
-      return withSheetCheck(list);
+      return withSheetCheck(list, sheet);
     }
     if ((tool === 'parallel' || tool === 'perpendicular') && refSeg) {
       let result: [Pt, Pt] | null = null;
@@ -522,7 +670,7 @@ export function DrawingApp() {
         if (!result) return { entities: [], error: 'No se puede construir: el punto está sobre la referencia o los datos no son válidos.' };
       } else return null;
       if (!result) return { entities: [], error: 'No se puede construir con estos valores.' };
-      return withSheetCheck([{ type: 'segment', a: result[0], b: result[1] } as Draft]);
+      return withSheetCheck(sheet, [{ type: 'segment', a: result[0], b: result[1] } as Draft]);
     }
     return null;
   })();
@@ -539,21 +687,21 @@ export function DrawingApp() {
     if (tool !== 'ruler' || !ruleStart) return null;
     const length = toNum(ruleLength), angle = toNum(ruleAngle);
     if (!(length > 0 && length <= 500) || !Number.isFinite(angle)) return { entities: [], error: 'Longitud (0–500 mm) o ángulo no válidos.' };
-    return withSheetCheck([{ type: 'segment', a: ruleStart, b: pointAt(ruleStart, angle, length) } as Draft]);
+    return withSheetCheck(sheet, [{ type: 'segment', a: ruleStart, b: pointAt(ruleStart, angle, length) } as Draft]);
   })();
   const compNumeric: Pending | null = (() => {
     if (tool !== 'compass' || !compCenter) return null;
     const r = toNum(compRadius);
     if (!(r > 0 && r <= 500)) return { entities: [], error: 'Radio no válido (0–500 mm).' };
-    if (compFull) return withSheetCheck([{ type: 'circle', c: compCenter, r } as Draft]);
+    if (compFull) return withSheetCheck(sheet, [{ type: 'circle', c: compCenter, r } as Draft]);
     const start = toNum(compStart), endA = toNum(compEnd);
     if (!Number.isFinite(start) || !Number.isFinite(endA)) return { entities: [], error: 'Ángulo no válido.' };
     if (sweepBetween(start, endA) === 0) return { entities: [], error: 'El ángulo inicial y el final coinciden.' };
-    return withSheetCheck([arcDraft(compCenter, r, start, endA, compCw)]);
+    return withSheetCheck(sheet, [arcDraft(compCenter, r, start, endA, compCw)]);
   })();
   const fixStartFromFields = (x: string, y: string, set: (p: Pt) => void) => {
     const p = { x: toNum(x), y: toNum(y) };
-    if (!pointInsideSheet(p)) { setNotice('Coordenadas fuera de la hoja (X 0–210, Y 0–297 mm).'); return; }
+    if (!pointInsideSheet(p, sheet)) { setNotice(`Coordenadas fuera de la hoja (X 0–${sheet.w}, Y 0–${sheet.h} mm).`); return; }
     set(p); setNotice('');
   };
 
@@ -590,12 +738,13 @@ export function DrawingApp() {
     window.setTimeout(() => URL.revokeObjectURL(url), 30000);
   };
   const downloadPng = () => {
-    const svgString = buildSheetSvg(entities, meta.margins, { grid: exportGrid });
+    const svgString = buildSheetSvg(entities, meta.margins, { grid: exportGrid, sheet });
     const image = new Image();
     const url = URL.createObjectURL(new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' }));
     image.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width = 2480; canvas.height = 3508;
+      // 300 ppp: 2480 × 3508 px en vertical, 3508 × 2480 en horizontal.
+      canvas.width = Math.round(sheet.w / 25.4 * 300); canvas.height = Math.round(sheet.h / 25.4 * 300);
       const context = canvas.getContext('2d');
       URL.revokeObjectURL(url);
       if (!context) return;
@@ -610,7 +759,7 @@ export function DrawingApp() {
   const downloadPdf = async () => {
     setPdfBusy(true);
     try {
-      const bytes = await createA4Pdf(entities, meta.margins, { grid: exportGrid });
+      const bytes = await createA4Pdf(entities, meta.margins, { grid: exportGrid, orientation });
       download(new Blob([new Uint8Array(bytes).buffer], { type: 'application/pdf' }), 'dibujo-tecnico-a4.pdf');
       setModal(null);
     } catch {
@@ -618,7 +767,7 @@ export function DrawingApp() {
     } finally { setPdfBusy(false); }
   };
   const printPdf = () => {
-    setPrintSvg(buildSheetSvg(entities, meta.margins, { grid: exportGrid }));
+    setPrintSvg(`<style>@page { size: A4 ${orientation}; margin: 0; } @media print { #print-sheet, #print-sheet svg { width: ${sheet.w}mm !important; height: ${sheet.h}mm !important; } }</style>${buildSheetSvg(entities, meta.margins, { grid: exportGrid, sheet })}`);
     setModal(null);
     window.setTimeout(() => window.print(), 120);
   };
@@ -634,7 +783,7 @@ export function DrawingApp() {
   const applyRealScale = (cssPxPerMm: number) => {
     if (!stageSize) return;
     const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, cssPxPerMm));
-    setView({ scale, tx: (stageSize.width - 210 * scale) / 2, ty: 8 });
+    setView({ scale, tx: (stageSize.width - sheet.w * scale) / 2, ty: 8 });
     setNotice(scale !== cssPxPerMm ? 'El zoom máximo no alcanza la escala 1:1 en esta pantalla.' : '');
   };
   const goRealScale = () => { if (!cssPxPerPhysicalMm) { setCalMeasured(''); setModal('calibrate'); return; } applyRealScale(cssPxPerPhysicalMm); };
@@ -652,7 +801,7 @@ export function DrawingApp() {
   const editing = editingId ? entities.find(e => e.id === editingId) ?? null : null;
   const patchEditing = (patch: EntityPatch) => {
     if (!editing) return;
-    const res = updateEntity(entities, editing.id, patch);
+    const res = updateEntity(entities, editing.id, patch, sheet);
     setEditError(res.error);
     if (!res.error) commit(res.entities);
   };
@@ -663,16 +812,14 @@ export function DrawingApp() {
   />;
 
   // ── Dibujo del escenario ──
-  const vb = stageSize ? viewBoxFor(view, stageSize.width, stageSize.height) : { x: 0, y: 0, w: 210, h: 297 };
+  const vb = stageSize ? viewBoxFor(view, stageSize.width, stageSize.height) : { x: 0, y: 0, w: sheet.w, h: sheet.h };
   const px = 1 / view.scale; // 1 px de pantalla en mm
-  const shown = g && g.tool === 'eraser' && g.working ? g.working : entities;
-  const gridLines = useMemo(() => <>
-    {Array.from({ length: 211 }, (_, i) => <line key={`x-${i}`} x1={i} y1="0" x2={i} y2="297" stroke={gridStyle.color(i)} strokeWidth={gridStyle.weight(i)} />)}
-    {Array.from({ length: 298 }, (_, i) => <line key={`y-${i}`} x1="0" y1={i} x2="210" y2={i} stroke={gridStyle.color(i)} strokeWidth={gridStyle.weight(i)} />)}
-  </>, []);
-  const entityNodes = useMemo(() => shown.map(e => e.type === 'point'
-    ? <path key={e.id} d={entityPathD(e)} fill={e.color} data-testid={`entity-${e.id}`} data-type={e.type} />
-    : <path key={e.id} d={entityPathD(e)} fill="none" stroke={e.color} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" data-testid={`entity-${e.id}`} data-type={e.type} />), [shown]);
+  // Durante una pasada del borrador se sigue mostrando la geometría anterior y, encima, la estela pintada con el
+  // mismo papel milimetrado: lo que queda bajo la estela es exactamente lo que se borra (cápsulas de radio r).
+  // El resultado exacto (g.working) se calcula en cada movimiento y se aplica al levantar el lápiz. Así cada
+  // movimiento solo repinta un tramo pequeño, en vez de toda la geometría que cruza un elemento recortado.
+  const shown = entities;
+  const entityNodes = useMemo(() => shown.map(e => <EntityPath key={e.id} entity={e} />), [shown]);
   const highlightIds = [editingId, relRef].filter(Boolean) as string[];
   const previewPath = (d: Draft, key: string) => {
     const e = sanitizeEntity({ ...d, id: key, color: '#cf6349', width: meta.width });
@@ -735,21 +882,31 @@ export function DrawingApp() {
   ];
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-project-id={project.id}>
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark"><Ruler size={19} strokeWidth={1.8} /></div>
-          <div><div className="brand-name">Dibujo Técnico A4</div><div className="brand-sub">MESA DE PRECISIÓN · MILÍMETROS REALES</div></div>
+          <button className="btn" onClick={exitToLibrary} disabled={leaving} data-testid="button-library" aria-label="Volver a la biblioteca"><FolderOpen size={15} /><span className="export-label">Biblioteca</span></button>
+          <div className="project-title"><div className="brand-name" data-testid="text-project-name">{project.name}</div><div className="brand-sub">DIBUJO TÉCNICO A4 · MILÍMETROS REALES</div></div>
         </div>
         <div className="top-actions">
-          <span className="status-save" data-testid="status-autosave">{saveError ? 'No se pudo guardar' : saved ? 'Guardado local' : 'Guardando…'}</span>
+          <span className={`status-save status-${saveState.status}`} data-testid="status-autosave" data-status={saveState.status} title={saveState.message}>{SAVE_LABEL[saveState.status]}</span>
+          <button className="btn" onClick={saveNow} disabled={saveState.status === 'conflict'} data-testid="button-save"><Save size={15} /><span className="export-label">Guardar</span></button>
           <button className="btn" onClick={() => setModal('export')} data-testid="button-export"><FileDown size={15} /><span className="export-label">Exportar</span></button>
         </div>
       </header>
 
       <div className="workspace">
         <aside className="tool-rail" aria-label="Herramientas de dibujo">
-          {loadNotice && <div className="notice info" data-testid="text-load-notice">{loadNotice}<button className="link-btn" onClick={() => setLoadNotice('')}>Cerrar</button></div>}
+          {(saveState.status === 'error' || saveState.status === 'conflict') && <div className="notice save-problem" role="alert" data-testid="save-problem">
+            <b>{saveState.status === 'conflict' ? 'No se ha guardado: conflicto' : 'No se ha podido guardar'}</b>
+            <span>{saveState.message} Tus cambios siguen en pantalla y no se ha sobrescrito nada.</span>
+            <div className="problem-actions">
+              {saveState.status === 'error' && <button className="btn small" onClick={() => void managerRef.current?.flush()} data-testid="button-retry-save">Reintentar</button>}
+              {saveState.status === 'conflict' && <button className="btn small" onClick={saveAsCopy} data-testid="button-save-copy">Guardar mis cambios como copia</button>}
+              {saveState.status === 'conflict' && <button className="btn small" onClick={() => void reloadFromStore('Se cargó la versión guardada; se descartaron los cambios de esta pestaña.').catch(e => setNotice(String(e?.message || e)))} data-testid="button-reload-saved">Descartar los míos y cargar la versión guardada</button>}
+              <button className="btn small" onClick={exportJson} data-testid="button-export-json-emergency">Exportar copia (JSON)</button>
+            </div>
+          </div>}
           <section className="panel-section primary-tools">
             <div className="section-head">Herramientas <Settings2 size={13} /></div>
             <div className="tool-grid">
@@ -901,6 +1058,12 @@ export function DrawingApp() {
           </section>
 
           <section className="panel-section">
+            <div className="section-head">Hoja</div>
+            <Seg value={orientation} onChange={changeOrientation} testid="seg-orientation" options={[{ value: 'portrait', label: 'Vertical' }, { value: 'landscape', label: 'Horizontal' }]} />
+            <div className="hint-small">Cambiar la orientación no mueve ni deforma la geometría.</div>
+          </section>
+
+          <section className="panel-section">
             <div className="section-head">Márgenes · mm</div>
             <div className="margin-grid">
               {(['top', 'right', 'bottom', 'left'] as const).map((side, index) => <label className="margin-field" key={side}><ExactField bare inputClassName="" label={['Superior', 'Derecho', 'Inferior', 'Izquierdo'][index]} value={meta.margins[side]} onCommit={v => setMargin(side, v)} validate={validateMargin} testid={`input-margin-${side}`} /></label>)}
@@ -919,15 +1082,17 @@ export function DrawingApp() {
 
         <section className="canvas-area">
           <div className="canvas-toolbar">
-            <div className="doc-label"><span className="doc-pill">A4</span><span>Vertical</span><span className="mono">210 × 297 mm</span></div>
+            <div className="doc-label"><span className="doc-pill">A4</span><span data-testid="text-orientation">{orientation === 'landscape' ? 'Horizontal' : 'Vertical'}</span><span className="mono">{sheet.w} × {sheet.h} mm</span></div>
             <div className="canvas-controls">
-              <button className="btn small" onClick={goRealScale} data-testid="button-real-scale" aria-label="Escala real 1:1">1:1</button>
-              <button className="btn small" onClick={() => { setCalMeasured(''); setModal('calibrate'); }} data-testid="button-calibrate">Calibrar</button>
+              {SHOW_PHYSICAL_SCALE && <>
+                <button className="btn small" onClick={goRealScale} data-testid="button-real-scale" aria-label="Escala real 1:1">1:1</button>
+                <button className="btn small" onClick={() => { setCalMeasured(''); setModal('calibrate'); }} data-testid="button-calibrate">Calibrar</button>
+              </>}
               <button className="icon-btn" aria-label="Alejar" onClick={() => zoomCentered(1 / 1.25)} data-testid="button-zoom-out"><ZoomOut size={17} /></button>
               <span className="zoom-readout" data-testid="text-zoom">{Math.round(view.scale / fitScale * 100)}%</span>
               <button className="icon-btn" aria-label="Acercar" onClick={() => zoomCentered(1.25)} data-testid="button-zoom-in"><ZoomIn size={17} /></button>
               <button className="icon-btn" aria-label="Ajustar hoja al área visible" onClick={fit} data-testid="button-fit"><Circle size={15} /></button>
-              <span className="scale-readout" data-testid="text-scale">{scaleLabel}</span>
+              {SHOW_PHYSICAL_SCALE && <span className="scale-readout" data-testid="text-scale">{scaleLabel}</span>}
             </div>
           </div>
           <div className="stage" ref={stageRef} data-testid="drawing-stage">
@@ -940,14 +1105,30 @@ export function DrawingApp() {
               onContextMenu={event => event.preventDefault()}
               data-testid="drawing-sheet" data-scale={view.scale} data-tx={view.tx} data-ty={view.ty}
             >
-              <defs><clipPath id="sheet-clip"><rect x="0" y="0" width="210" height="297" /></clipPath></defs>
-              <rect x={3 * px} y={5 * px} width="210" height="297" fill="#36545b" fillOpacity=".14" />
-              <rect x="0" y="0" width="210" height="297" fill="white" data-testid="sheet-rect" />
-              <g pointerEvents="none">{gridLines}</g>
-              <rect fill="none" stroke="#85b8a6" strokeWidth=".22" strokeDasharray="1.3 1.1" pointerEvents="none" x={meta.margins.left} y={meta.margins.top} width={Math.max(0, 210 - meta.margins.left - meta.margins.right)} height={Math.max(0, 297 - meta.margins.top - meta.margins.bottom)} />
-              <g clipPath="url(#sheet-clip)">
+              <defs>
+                <clipPath id="sheet-clip"><rect x="0" y="0" width={sheet.w} height={sheet.h} /></clipPath>
+                {/* Papel milimetrado como patrón (10 × 10 mm), idéntico a la cuadrícula: lo usa la estela del borrador. */}
+                <pattern id="paper" patternUnits="userSpaceOnUse" x="0" y="0" width="10" height="10">
+                  <rect width="10" height="10" fill="white" />
+                  {Array.from({ length: 11 }, (_, i) => <g key={i}>
+                    <line x1={i} y1="0" x2={i} y2="10" stroke={gridStyle.color(i % 10)} strokeWidth={gridStyle.weight(i % 10)} />
+                    <line x1="0" y1={i} x2="10" y2={i} stroke={gridStyle.color(i % 10)} strokeWidth={gridStyle.weight(i % 10)} />
+                  </g>)}
+                </pattern>
+              </defs>
+              <rect x={3 * px} y={5 * px} width={sheet.w} height={sheet.h} fill="#36545b" fillOpacity=".14" />
+              <rect x="0" y="0" width={sheet.w} height={sheet.h} fill="white" data-testid="sheet-rect" data-orientation={orientation} />
+              <g pointerEvents="none"><SheetGrid sheet={sheet} /></g>
+              <rect fill="none" stroke="#85b8a6" strokeWidth=".22" strokeDasharray="1.3 1.1" pointerEvents="none" x={meta.margins.left} y={meta.margins.top} width={Math.max(0, sheet.w - meta.margins.left - meta.margins.right)} height={Math.max(0, sheet.h - meta.margins.top - meta.margins.bottom)} />
+              {/* Los trazados no reciben eventos: la app localiza los elementos con su propia prueba exacta en mm.
+                  Así el navegador no recorre toda la geometría en cada movimiento del puntero (hit-testing). */}
+              <g clipPath="url(#sheet-clip)" pointerEvents="none">
                 {highlightIds.map(id => { const e = shown.find(x => x.id === id); return e ? <path key={`hl-${id}`} d={entityPathD(e)} fill={e.type === 'point' ? '#e36b47' : 'none'} stroke="#e36b47" strokeOpacity=".5" strokeWidth={e.type === 'point' ? 4 * px : e.width + 5 * px} strokeLinecap="round" pointerEvents="none" /> : null; })}
                 {entityNodes}
+                {g && g.tool === 'eraser' && <g data-testid="eraser-trail" pointerEvents="none">
+                  <circle cx={g.trail[0].x} cy={g.trail[0].y} r={g.eraseR} fill="url(#paper)" />
+                  {g.trail.slice(1).map((q, i) => <line key={i} x1={g.trail[i].x} y1={g.trail[i].y} x2={q.x} y2={q.y} stroke="url(#paper)" strokeWidth={2 * g.eraseR} strokeLinecap="round" />)}
+                </g>}
                 {g && g.tool === 'pen' && <path d={entityPathD({ id: 'live', type: 'polyline', color: meta.color, width: meta.width, points: g.points })} fill="none" stroke={meta.color} strokeWidth={meta.width} strokeLinecap="round" strokeLinejoin="round" data-testid="live-stroke" />}
               </g>
               {protractorOverlay}
@@ -985,7 +1166,15 @@ export function DrawingApp() {
 
       {modal && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setModal(null); }}>
         <section className={`modal ${modal === 'calibrate' ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-          {modal === 'clear' ? <>
+          {modal === 'leave' ? <>
+            <h2 id="dialog-title">Hay cambios sin guardar</h2>
+            <p>{saveState.message || 'No se pudo confirmar el guardado.'} Si sales ahora, se perderán los cambios que no se guardaron.</p>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setModal(null)} data-testid="button-stay">Seguir aquí</button>
+              <button className="btn" onClick={() => { setModal(null); exportJson(); }} data-testid="button-leave-export">Exportar copia (JSON)</button>
+              <button className="btn danger" onClick={() => { managerRef.current?.dispose(); try { clearJournal(localStorage, project.id); } catch { /* nada */ } onExit(); }} data-testid="button-leave-discard">Salir sin guardar</button>
+            </div>
+          </> : modal === 'clear' ? <>
             <h2 id="dialog-title">Limpiar la hoja</h2>
             <p>Se quitarán los {entities.length} elementos de este dibujo. Esta acción se puede deshacer.</p>
             <div className="modal-actions"><button className="btn" onClick={() => setModal(null)} data-testid="button-cancel-clear">Cancelar</button><button className="btn danger" onClick={() => { commit([]); setSelectedId(null); setLastCreatedId(null); setModal(null); }} data-testid="button-confirm-clear"><Trash2 size={14} />Limpiar</button></div>
@@ -1008,11 +1197,13 @@ export function DrawingApp() {
   );
 }
 
-function withSheetCheck(list: Draft[]): Pending {
+function withSheetCheck(a: Draft[] | Sheet, b?: Draft[] | Sheet): Pending {
+  const list = (Array.isArray(a) ? a : b) as Draft[];
+  const sheet = (Array.isArray(a) ? b : a) as Sheet;
   for (const d of list) {
     const e = sanitizeEntity({ ...d, id: 'tmp', color: '#000000', width: 0.45 });
     if (!e) return { entities: list, error: 'Valores no válidos.' };
-    if (!entityInsideSheet(e)) return { entities: list, error: 'Queda fuera de la hoja A4. Ajusta los valores.' };
+    if (!entityInsideSheet(e, 1e-9, sheet)) return { entities: list, error: 'Queda fuera de la hoja A4. Ajusta los valores.' };
   }
   return { entities: list };
 }

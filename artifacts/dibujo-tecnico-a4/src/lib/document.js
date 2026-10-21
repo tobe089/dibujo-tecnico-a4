@@ -13,7 +13,7 @@
 //   polyline  { points: [{x,y,p?}] }          trazo libre (p = presión 0..1 si se conoce)
 
 import {
-  SHEET_H, SHEET_W, angleInArc, nearestOnSegment, normalizeDeg, pointAt, segmentAngle, segmentLength,
+  A4_PORTRAIT, angleInArc, nearestOnSegment, normalizeDeg, pointAt, segmentAngle, segmentLength,
 } from './geometry.js';
 
 export const DOC_VERSION = 2;
@@ -189,14 +189,14 @@ function boundsOf(pts) {
 }
 
 /** ¿Cabe la geometría dentro de la hoja A4? (eps = holgura numérica en mm, no una tolerancia de dibujo) */
-export function entityInsideSheet(e, eps = 1e-9) {
+export function entityInsideSheet(e, eps = 1e-9, sheet = A4_PORTRAIT) {
   const b = entityBounds(e);
   return [b.minX, b.minY, b.maxX, b.maxY].every(isNum) &&
-    b.minX >= -eps && b.minY >= -eps && b.maxX <= SHEET_W + eps && b.maxY <= SHEET_H + eps;
+    b.minX >= -eps && b.minY >= -eps && b.maxX <= sheet.w + eps && b.maxY <= sheet.h + eps;
 }
 
-export function pointInsideSheet(p) {
-  return isPt(p) && p.x >= 0 && p.x <= SHEET_W && p.y >= 0 && p.y <= SHEET_H;
+export function pointInsideSheet(p, sheet = A4_PORTRAIT) {
+  return isPt(p) && p.x >= 0 && p.x <= sheet.w && p.y >= 0 && p.y <= sheet.h;
 }
 
 /** Distancia exacta (mm) de p a la geometría de la entidad (al eje del trazo, sin grosor). */
@@ -267,12 +267,12 @@ export function removeEntities(entities, ids) {
  * Sustituye la entidad `id` por la versión con `patch` aplicado. Devuelve
  * { entities, error } — si el resultado no es válido o se sale de la hoja, no cambia nada.
  */
-export function updateEntity(entities, id, patch) {
+export function updateEntity(entities, id, patch, sheet = A4_PORTRAIT) {
   const index = entities.findIndex((e) => e.id === id);
   if (index < 0) return { entities, error: 'La entidad ya no existe.' };
   const next = sanitizeEntity({ ...entities[index], ...patch, id });
   if (!next) return { entities, error: 'Valores no válidos.' };
-  if (!entityInsideSheet(next)) return { entities, error: 'Queda fuera de la hoja A4.' };
+  if (!entityInsideSheet(next, 1e-9, sheet)) return { entities, error: 'Queda fuera de la hoja A4.' };
   const out = entities.slice();
   out[index] = next;
   return { entities: out, error: null };

@@ -2,7 +2,7 @@
 //   pantalla = t + scale · mm        (scale = px CSS por mm de hoja)
 // El zoom siempre se ancla a un punto de pantalla: el punto de la hoja que estaba bajo él sigue bajo él.
 
-import { SHEET_H, SHEET_W } from './geometry.js';
+import { A4_PORTRAIT } from './geometry.js';
 
 export const MIN_SCALE = 0.4; // px por mm
 export const MAX_SCALE = 60;
@@ -10,9 +10,9 @@ export const MAX_SCALE = 60;
 const clampScale = (s) => Math.max(MIN_SCALE, Math.min(MAX_SCALE, s));
 
 /** Vista que encaja la hoja completa en el escenario con `pad` px de margen, centrada. */
-export function fitView(stageW, stageH, pad = 24) {
-  const scale = clampScale(Math.min((stageW - 2 * pad) / SHEET_W, (stageH - 2 * pad) / SHEET_H));
-  return { scale, tx: (stageW - SHEET_W * scale) / 2, ty: (stageH - SHEET_H * scale) / 2 };
+export function fitView(stageW, stageH, pad = 24, sheet = A4_PORTRAIT) {
+  const scale = clampScale(Math.min((stageW - 2 * pad) / sheet.w, (stageH - 2 * pad) / sheet.h));
+  return { scale, tx: (stageW - sheet.w * scale) / 2, ty: (stageH - sheet.h * scale) / 2 };
 }
 
 export function screenToDoc(view, sx, sy) {

@@ -8,6 +8,11 @@ export type GStroke = {
 
 export const SHEET_W: number;
 export const SHEET_H: number;
+export type Sheet = { w: number; h: number };
+export type Orientation = 'portrait' | 'landscape';
+export const A4_PORTRAIT: Sheet;
+export const A4_LANDSCAPE: Sheet;
+export function sheetFor(orientation: Orientation | string | undefined): Sheet;
 export const CURVE_TOLERANCE_MM: number;
 
 export function normalizeDeg(angle: number): number;
@@ -30,7 +35,7 @@ export function bezierPoint(b: Bezier, t: number): GPoint;
 export function nearestOnSegment(p: GPoint, a: GPoint, b: GPoint): { point: GPoint; t: number; dist: number };
 export function distanceToPolyline(p: GPoint, pts: GPoint[]): number;
 export function findStrokeAt<T extends GStroke>(p: GPoint, strokes: T[], tolMm: number, filter?: (s: T) => boolean): T | null;
-export function pointsInsideSheet(points: GPoint[], eps?: number): boolean;
+export function pointsInsideSheet(points: GPoint[], eps?: number, sheet?: Sheet): boolean;
 
 export function relatedLine(args: {
   ref0: GPoint; ref1: GPoint; mode: 'parallel' | 'perpendicular'; through: GPoint;

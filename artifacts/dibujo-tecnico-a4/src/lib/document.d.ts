@@ -36,15 +36,16 @@ export function serializeDocument(doc: Doc): string;
 
 export function arcEndpoints(e: ArcEntity): { p0: Pt; p1: Pt };
 export function entityBounds(e: Entity): Bounds;
-export function entityInsideSheet(e: Entity, eps?: number): boolean;
-export function pointInsideSheet(p: Pt): boolean;
+import type { Sheet } from './geometry.js';
+export function entityInsideSheet(e: Entity, eps?: number, sheet?: Sheet): boolean;
+export function pointInsideSheet(p: Pt, sheet?: Sheet): boolean;
 export function distanceToEntity(p: Pt, e: Entity): number;
 export function hitTest(p: Pt, entities: Entity[], tolMm: number, filter?: (e: Entity) => boolean): Entity | null;
 export function entityLength(e: Entity): number;
 
 export function addEntities(entities: Entity[], added: Entity[]): Entity[];
 export function removeEntities(entities: Entity[], ids: string[]): Entity[];
-export function updateEntity(entities: Entity[], id: string, patch: EntityPatch): { entities: Entity[]; error: string | null };
+export function updateEntity(entities: Entity[], id: string, patch: EntityPatch, sheet?: Sheet): { entities: Entity[]; error: string | null };
 export function segmentWithLength(e: SegmentEntity, length: number): { b: Pt };
 export function segmentWithAngle(e: SegmentEntity, angleDeg: number): { b: Pt };
 
