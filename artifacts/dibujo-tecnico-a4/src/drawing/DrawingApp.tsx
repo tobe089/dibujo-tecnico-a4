@@ -20,6 +20,7 @@ import { createSaveManager, type SaveManager, type SaveStatus } from '@/lib/save
 import { clearJournal, writeJournal } from '@/lib/journal.js';
 import { makeThumbnail, projectChannel } from './project-io';
 import { eraseWithCapsule } from '@/lib/erase.js';
+import { TRACE_BAND_PX, circleTraceResult, circleTraceSweep, createCircleTrace, extendCircleTrace, startsOnCircle, type CircleTrace } from '@/lib/guides.js';
 import { buildSheetSvg, entityPathD, gridStyle, n, pointRadius } from '@/lib/render.js';
 import { MAX_SCALE, MIN_SCALE, fitView, panBy, pinchView, screenToDoc, viewBoxFor, zoomAt, type View } from '@/lib/view.js';
 import {
@@ -56,6 +57,8 @@ type Gesture = {
   eraseR: number; working: Entity[] | null; lastErase: Pt | null;
   /** Posiciones del borrador (mm) para pintar la estela; el resultado exacto está en `working`. */
   trail: Pt[];
+  /** Trazo sobre la guía del compás: centro y radio quedan fijados al apoyar el lápiz. */
+  trace: CircleTrace | null;
 };
 
 const PREFS_KEY = 'dibujo-tecnico-a4-prefs-v2';
@@ -521,8 +524,12 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     const g: Gesture = {
       id, pointerType, tool, startScreen: s, startDoc: d, curDoc: d, moved: false,
       points: [pointerType === 'pen' ? { ...d, p: pressure } : d],
-      eraseR: prefs.eraserPx / viewRef.current.scale, working: null, lastErase: null, trail: [d],
+      eraseR: prefs.eraserPx / viewRef.current.scale, working: null, lastErase: null, trail: [d], trace: null,
     };
+    // Compás listo, visible y con «Trazar con el compás»: el trazo sigue la guía solo si empieza dentro de su banda.
+    if (tool === 'compass' && compPose && compVisible && compTrace && startsOnCircle(compPose, compR, d, viewRef.current.scale)) {
+      g.trace = extendCircleTrace(createCircleTrace(compPose, compR, { scale: viewRef.current.scale }), d);
+    }
     if (tool === 'eraser') {
       g.working = eraseWithCapsule(entitiesRef.current, d, d, g.eraseR, { mode: prefs.eraserMode });
       g.lastErase = d;
@@ -537,6 +544,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
       // Toque o arrastre se decide en px de PANTALLA (TAP_SLOP_PX); las coordenadas guardadas siguen siendo las exactas.
       if (!g.moved && beyondTapSlop(g.pointerType, g.startScreen, s)) g.moved = true;
       if (g.tool === 'pen') g.points.push(g.pointerType === 'pen' ? { ...d, p: pressure } : d);
+      if (g.trace) extendCircleTrace(g.trace, d);
       if (g.tool === 'eraser' && g.working && g.lastErase) {
         g.working = eraseWithCapsule(g.working, g.lastErase, d, g.eraseR, { mode: prefs.eraserMode });
         g.lastErase = d;
@@ -581,8 +589,14 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
       case 'compass': {
         // Definir el compás (dos toques o un arrastre del centro al radio) solo configura la guía: no crea figuras.
         if (compPose) {
-          // Ya definido: los toques no lo mueven (se recoloca a propósito con «Recolocar compás»).
-          setNotice('El compás ya está definido. Para moverlo, pulsa «Recolocar compás».');
+          // Trazo sobre la guía: se crea solo lo recorrido (arco) o la circunferencia si llega a 360°. Un toque
+          // (sin pasar del umbral de arrastre) no crea nada. El compás no se mueve: «Recolocar compás».
+          if (g.trace && g.moved) {
+            const traced = circleTraceResult(g.trace);
+            if (traced) tryCreate([traced as Draft]);
+          } else if (!compVisible) setNotice('El compás está oculto: muéstralo para trazar sobre la guía.');
+          else if (g.moved && compTrace) setNotice(`Empieza el trazo sobre la guía del compás (a menos de ${TRACE_BAND_PX} px).`);
+          else if (!g.trace) setNotice(compTrace ? 'El compás ya está definido. Para moverlo, pulsa «Recolocar compás».' : 'Activa «Trazar con el compás» para dibujar sobre la guía.');
           break;
         }
         if (!compPending) {
@@ -683,7 +697,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     const g = gestureRef.current;
     if (role === 'draw' && g && g.id === e.pointerId) {
       if (!cancelled) finishGesture(g);
-      else if (cancelOutcome(g.tool, g.pointerType, g.points.length) === 'keep') {
+      else if (cancelOutcome(g.trace ? 'compass-trace' : g.tool, g.pointerType, g.trace ? (g.moved ? 2 : 1) : g.points.length) === 'keep') {
         // Android interrumpió el lápiz: se conserva lo dibujado o borrado hasta ese momento (un paso de deshacer).
         finishGesture(g);
         setNotice('El sistema interrumpió el trazo: se conservó hasta el punto de interrupción.');
@@ -782,6 +796,11 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     }
     return null;
   })();
+
+  // Tramo trazado sobre la guía del compás (geometría que se creará al levantar el lápiz).
+  const traceLive = g && g.trace && g.moved ? circleTraceResult(g.trace) : null;
+  /** El lápiz sobrevuela la banda de la guía: se resalta para indicar que el trazo la seguirá. */
+  const nearGuide = tool === 'compass' && !!compPose && compVisible && compTrace && !g && !!hover && startsOnCircle(compPose, compR, hover, view.scale);
 
   // ── Exportación ──
   const download = (blob: Blob, name: string) => {
@@ -917,17 +936,18 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   // Guía del compás: trazo discontinuo de instrumento, fuera de la geometría (no se exporta ni se borra).
   const compassGuide = useMemo(() => {
     if (!compVisible || !compPose) return null;
+    const w = nearGuide ? 2.2 : 1.3;
     const c = { x: compPose.x, y: compPose.y };
     const tip = pointAt(c, compPose.rotation, compR);
     const mid = pointAt(c, compPose.rotation, compR / 2);
-    return <g pointerEvents="none" data-testid="compass-guide" data-cx={c.x} data-cy={c.y} data-r={compR} data-rotation={compPose.rotation}>
-      <circle cx={c.x} cy={c.y} r={compR} fill="none" stroke="#2f7f8f" strokeWidth={1.3 * px} strokeDasharray={`${5 * px} ${4 * px}`} strokeOpacity=".9" />
+    return <g pointerEvents="none" data-testid="compass-guide" data-cx={c.x} data-cy={c.y} data-r={compR} data-rotation={compPose.rotation} data-near={String(nearGuide)}>
+      <circle cx={c.x} cy={c.y} r={compR} fill="none" stroke="#2f7f8f" strokeWidth={w * px} strokeDasharray={`${5 * px} ${4 * px}`} strokeOpacity=".9" />
       <line x1={c.x} y1={c.y} x2={tip.x} y2={tip.y} stroke="#2f7f8f" strokeWidth={px} strokeOpacity=".8" />
       <line x1={c.x - 6 * px} y1={c.y} x2={c.x + 6 * px} y2={c.y} stroke="#2f7f8f" strokeWidth={1.3 * px} />
       <line x1={c.x} y1={c.y - 6 * px} x2={c.x} y2={c.y + 6 * px} stroke="#2f7f8f" strokeWidth={1.3 * px} />
       <text x={mid.x} y={mid.y - 4 * px} fontSize={11 * px} textAnchor="middle" fill="#2f7f8f">r {fmtNum(compR)} mm</text>
     </g>;
-  }, [compVisible, compPose, compR, px]);
+  }, [compVisible, compPose, compR, px, nearGuide]);
 
   // ── Paneles ──
   const errorLine = (p: Pending | null) => (p?.error ? <div className="notice" data-testid="text-construction-error">{p.error}</div> : null);
@@ -936,7 +956,8 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     <button className="btn" onClick={onReset} data-testid="button-reset-construction">Reiniciar</button>
   </div>;
   const noticeLine = notice ? <div className="notice" data-testid="text-notice">{notice}</div> : null;
-  const liveLine = livePreview ? <div className="hint-small mono-line" data-testid="text-live">Vista previa: {livePreview.label}</div> : null;
+  const liveText = livePreview ? `Vista previa: ${livePreview.label}` : traceLive ? `Trazando: ${traceLive.type === 'circle' ? 'circunferencia completa' : `arco de ${fmtNum(circleTraceSweep(g!.trace!), 1)}°`} · r ${fmtNum(traceLive.r)} mm` : '';
+  const liveLine = liveText ? <div className="hint-small mono-line" data-testid="text-live">{liveText}</div> : null;
   const scaleLabel = screenScale === null ? 'escala sin calibrar' : Math.abs(screenScale - 1) < 0.005 ? '1:1 real' : `×${screenScale.toFixed(2)}`;
   const fingerNow = prefs.fingerMode === 'all';
   const toolHints: Record<Tool, string> = {
@@ -1025,11 +1046,12 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
             <div className="section-head">Compás · guía de trazado</div>
             <div className="rule-box" data-testid="status-compass">
               <b>{compPose ? '03 / Compás listo' : compPending ? '02 / Marca el radio' : '01 / Marca el centro'}</b>
-              {compPose ? 'La guía no forma parte del dibujo. Para moverla, pulsa «Recolocar compás».'
+              {compPose ? (compTrace ? 'Traza con el S Pen sobre la guía: se crea solo lo recorrido, o la circunferencia si das la vuelta completa. La guía no forma parte del dibujo; para moverla, pulsa «Recolocar compás».' : 'La guía no forma parte del dibujo. Para moverla, pulsa «Recolocar compás».')
                 : compPending ? 'Toca un punto: el radio es la distancia exacta al centro. También puedes escribirlo y pulsar «Fijar radio».'
                   : 'Toca el centro, o arrastra del centro a un punto de la circunferencia. Definir el compás no dibuja nada.'}
               {liveLine}{noticeLine}
               {compPose && <Toggle checked={compVisible} onChange={setCompVisible} label="Mostrar compás" testid="toggle-compass-visible" />}
+              {compPose && <Toggle checked={compTrace} onChange={setCompTrace} label="Trazar con el compás" testid="toggle-compass-trace" />}
               <div className="field-stack">
                 {compCenter && <div className="hint-small mono-line" data-testid="text-compass-center">Centro: ({fmtNum(compCenter.x)}, {fmtNum(compCenter.y)}) mm{compPose ? ` · r ${fmtNum(compR)} mm · Ø ${fmtNum(2 * compR)} mm` : ''}</div>}
                 <div className="field-pair">
@@ -1210,6 +1232,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
                   <circle cx={g.trail[0].x} cy={g.trail[0].y} r={g.eraseR} fill="url(#paper)" />
                   {g.trail.slice(1).map((q, i) => <line key={i} x1={g.trail[i].x} y1={g.trail[i].y} x2={q.x} y2={q.y} stroke="url(#paper)" strokeWidth={2 * g.eraseR} strokeLinecap="round" />)}
                 </g>}
+                {traceLive && (() => { const e = sanitizeEntity({ ...traceLive, id: 'trace-live', color: meta.color, width: meta.width }); return e ? <path d={entityPathD(e)} fill="none" stroke={meta.color} strokeWidth={meta.width} strokeLinecap="round" data-testid="live-trace" /> : null; })()}
                 {g && g.tool === 'pen' && <path d={entityPathD({ id: 'live', type: 'polyline', color: meta.color, width: meta.width, points: g.points })} fill="none" stroke={meta.color} strokeWidth={meta.width} strokeLinecap="round" strokeLinejoin="round" data-testid="live-stroke" />}
               </g>
               {protractorOverlay}

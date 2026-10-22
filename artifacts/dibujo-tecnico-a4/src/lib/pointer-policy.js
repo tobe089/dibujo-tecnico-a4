@@ -37,13 +37,15 @@ export function shouldRevertNav(navStartT, penDownT) {
 
 /**
  * Qué hacer con un gesto de dibujo cuando el sistema lo cancela (pointercancel).
- *  'keep'    → conservar lo dibujado hasta la interrupción (trazo libre o borrado ya visible, con lápiz o ratón).
+ *  'keep'    → conservar lo dibujado hasta la interrupción (trazo libre, trazo sobre la guía del compás o borrado
+ *              ya visible, con lápiz o ratón).
  *  'discard' → descartar limpiamente sin cambiar nada (construcciones cuyo punto final no se conoce,
  *              o contactos del dedo, que Android cancela sobre todo al detectar gestos o palma).
+ * 'compass-trace' es un trazo sobre la guía del compás; 'compass' sin más es definir la guía (se descarta).
  */
 export function cancelOutcome(tool, pointerType, pointCount) {
   if (pointerType === 'touch') return 'discard';
-  if (tool === 'pen') return pointCount >= 2 ? 'keep' : 'discard';
+  if (tool === 'pen' || tool === 'compass-trace') return pointCount >= 2 ? 'keep' : 'discard';
   if (tool === 'eraser') return 'keep';
   return 'discard';
 }

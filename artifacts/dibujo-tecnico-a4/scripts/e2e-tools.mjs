@@ -97,6 +97,20 @@ async function penDrag(from, to, steps = 12) {
   for (let i = 1; i <= steps; i += 1) await pen('mouseMoved', { x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps });
   await pen('mouseReleased', b, 0); await page.waitForTimeout(30);
 }
+/** Trazo del lápiz por una lista de puntos (mm de hoja). Devuelve las posiciones de cliente usadas. */
+async function penPath(points, { release = true } = {}) {
+  const cs = []; for (const q of points) cs.push(await toClient(q.x, q.y));
+  await pen('mouseMoved', cs[0], 0); await pen('mousePressed', cs[0]);
+  for (const c of cs.slice(1)) await pen('mouseMoved', c);
+  if (release) { await pen('mouseReleased', cs.at(-1), 0); await page.waitForTimeout(30); }
+  return cs;
+}
+/** Puntos sobre una circunferencia de `from` a `to` grados (0° = derecha, 90° = arriba), con radio variable. */
+const arcPts = (c, r, from, to, step = 3, radial = () => 0) => {
+  const n = Math.max(1, Math.round(Math.abs(to - from) / step)); const out = [];
+  for (let i = 0; i <= n; i += 1) { const a = (from + (to - from) * i / n) * Math.PI / 180; const rr = r + radial(i); out.push({ x: c.x + rr * Math.cos(a), y: c.y - rr * Math.sin(a) }); }
+  return out;
+};
 const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
 const lastDown = () => page.evaluate(() => window.__downs.at(-1));
 
@@ -159,19 +173,17 @@ ok(g2 && g2.cx === cDoc.x && g2.cy === cDoc.y, 'guía: centro = primer toque exa
 ok(Math.hypot(g2.cx - ents[0].a.x, g2.cy - ents[0].a.y) > 3, 'el centro NO salta al extremo cercano');
 near(g2.r, Math.hypot(rDoc.x - cDoc.x, rDoc.y - cDoc.y), 1e-12, 'guía: radio = distancia exacta entre toques');
 near(g2.r, 30, 1.5 / vD.scale, 'radio ≈ 30 mm según los toques');
-// Circunferencia exacta con «Crear con estos valores» (acción explícita): usa el radio exacto, no el redondeado del campo.
-await page.click('[data-testid=button-place-line]');
+// Trazar con el S Pen una vuelta y algo más sobre la guía: circunferencia con el centro y el radio exactos de la guía.
+await penPath(arcPts({ x: g2.cx, y: g2.cy }, g2.r, 200, 200 + 375, 4, () => 0.6));
 ents = await entities();
 const circ = ents.at(-1);
-ok(circ.type === 'circle' && circ.c.x === g2.cx && circ.c.y === g2.cy && circ.r === g2.r, 'Crear con estos valores: circunferencia con el centro y el radio exactos de la guía');
-log(`compás: dos toques definen la guía sin dibujar; «Crear con estos valores» → r = ${circ.r.toFixed(4)} mm exacto`);
+ok(ents.length === nBefore + 1 && circ.type === 'circle' && circ.c.x === g2.cx && circ.c.y === g2.cy && circ.r === g2.r, 'trazar más de 360° sobre la guía: una circunferencia con el centro y el radio exactos');
+log(`compás: dos toques definen la guía sin dibujar; trazar la vuelta completa → circunferencia r = ${circ.r.toFixed(4)} mm exacto`);
 
-// Arco por valores, antihorario de 0° a 90°, con el centro y el radio marcados con toques.
+// Arco trazado en sentido antihorario de 0° a 90°, con el centro y el radio marcados con toques.
 await page.click('[data-testid=button-compass-relocate]');
 await penTap(150, 60); await penTap(170, 60);
-await page.click('[data-testid=toggle-compass-full]');
-await page.fill('[data-testid=input-compass-start]', '0'); await page.fill('[data-testid=input-compass-end]', '90');
-await page.click('[data-testid=button-place-line]');
+await penPath(arcPts({ x: 150, y: 60 }, 20, 0, 90, 3));
 ents = await entities();
 const arc = ents.at(-1);
 ok(arc.type === 'arc', 'arco creado');
@@ -180,8 +192,7 @@ near(arc.start, 0, 0.2, 'inicio del arco ≈ 0°'); near(arc.sweep, 90, 0.2, 'ba
 const mid = await page.evaluate((id) => { const p = document.querySelector(`[data-testid="entity-${id}"]`); const L = p.getTotalLength(); const q = p.getPointAtLength(L / 2); return { x: q.x, y: q.y }; }, arc.id);
 const expMid = { x: arc.c.x + arc.r * Math.cos((arc.start + arc.sweep / 2) * Math.PI / 180), y: arc.c.y - arc.r * Math.sin((arc.start + arc.sweep / 2) * Math.PI / 180) };
 near(Math.hypot(mid.x - expMid.x, mid.y - expMid.y), 0, 0.01, 'el arco SVG pasa por su punto medio teórico');
-await page.click('[data-testid=toggle-compass-full]');
-log('compás: arco exacto por valores, sentido antihorario correcto en pantalla');
+log('compás: arco trazado sobre la guía, sentido antihorario correcto en pantalla');
 
 // ───────── 3) Borrador parcial ─────────
 await page.click('[data-testid=tool-eraser]');
@@ -779,6 +790,140 @@ async function systemCancel() {
   ok(JSON.stringify(await guideNow()) === JSON.stringify(gd), 'recargar la página restaura la guía');
   ok((await entities()).length === 0, 'y el documento sigue sin figuras');
   log('compás: guía por toques, arrastre o valores; nunca crea figuras; persiste, se oculta, no se exporta y se restaura');
+}
+
+// ───────── 19) Compás: trazar con el S Pen siguiendo la guía circular ─────────
+{
+  await fresh();
+  const C = { x: 105, y: 148.5 };
+  const lastUp = () => page.evaluate(() => window.__ups.at(-1));
+  const ang = (p) => ((Math.atan2(-(p.y - C.y), p.x - C.x) * 180 / Math.PI) + 360) % 360;
+  await page.click('[data-testid=tool-compass]');
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '148.5');
+  await page.click('[data-testid=button-compass-fix-center]');
+  await page.fill('[data-testid=input-compass-radius]', '37.5'); await page.click('[data-testid=button-compass-fix-radius]');
+  ok((await entities()).length === 0, 'compás listo, documento vacío');
+
+  // Un cuarto de vuelta con temblor radial: arco con el radio exacto y los ángulos de los eventos del lápiz.
+  let v = await view();
+  await penPath(arcPts(C, 37.5, 10, 100, 2, (i) => (i % 2 ? 1.2 : -1.2)));
+  const d0 = clientToDoc(v, await lastDown()), d1 = clientToDoc(v, await lastUp());
+  let list = await entities();
+  const a1 = list[0];
+  ok(list.length === 1 && a1.type === 'arc' && a1.r === 37.5 && a1.c.x === 105 && a1.c.y === 148.5, 'cuarto de vuelta: un arco con centro y radio exactos (la mano tiembla ±1,2 mm)');
+  near(a1.start, ang(d0), 1e-9, 'inicio = ángulo exacto del punto de apoyo');
+  near(a1.sweep, ang(d1) - ang(d0), 1e-9, 'barrido = ángulo recorrido hasta levantar el lápiz');
+  ok(!Number.isInteger(a1.start * 1000), 'los ángulos no se redondean');
+  // El mismo tramo en sentido horario da el mismo arco.
+  await penPath(arcPts(C, 37.5, 100, 10, 2));
+  const b = (await entities())[1];
+  near(b.start, (ang(clientToDoc(v, await lastUp()))), 1e-9, 'horario: el inicio es el extremo de menor ángulo');
+  ok(b.type === 'arc' && Math.abs(b.sweep - 90) < 2, 'horario: arco de ≈ 90°');
+  await page.click('[data-testid=button-undo]'); await page.click('[data-testid=button-undo]');
+  ok((await entities()).length === 0, 'cada trazo se deshace en un solo paso');
+  await page.click('[data-testid=button-redo]');
+  ok((await entities()).length === 1 && (await entities())[0].id === a1.id, 'Rehacer lo restaura');
+  await page.click('[data-testid=button-undo]');
+
+  // 350° → arco (sin cierre automático); 370° → circunferencia.
+  await penPath(arcPts(C, 37.5, 30, 380, 4));
+  list = await entities();
+  ok(list.length === 1 && list[0].type === 'arc' && list[0].sweep > 345 && list[0].sweep < 360, `≈ 350°: sigue siendo un arco (${list[0].sweep.toFixed(2)}°)`);
+  await page.click('[data-testid=button-undo]');
+  await penPath(arcPts(C, 37.5, 30, 400, 4));
+  list = await entities();
+  ok(list.length === 1 && list[0].type === 'circle' && list[0].r === 37.5 && list[0].c.x === 105, '≈ 370°: una circunferencia exacta');
+  await page.click('[data-testid=button-undo]');
+
+  // Trazos que no siguen la guía: empezado lejos de la banda, o un simple toque sobre ella.
+  await penPath(arcPts(C, 37.5 + 40 / v.scale, 10, 80, 3));
+  ok((await entities()).length === 0 && (await page.locator('[data-testid=text-notice]').innerText()).includes('Empieza el trazo'), 'empezado a 40 px de la guía: no crea nada y lo indica');
+  await penTap(C.x + 37.5, C.y);
+  ok((await entities()).length === 0, 'un toque sobre la guía no crea nada');
+  // Sobrevolar la banda la resalta.
+  const hoverAt = await toClient(C.x, C.y - 37.5);
+  await pen('mouseMoved', hoverAt, 0);
+  ok(await page.evaluate(() => document.querySelector('[data-testid=compass-guide]').dataset.near === 'true'), 'el lápiz sobre la banda resalta la guía');
+
+  // Cambiar el radio entre trazos solo mueve la guía; lo dibujado no cambia.
+  await penPath(arcPts(C, 37.5, 200, 260, 3));
+  const keep = JSON.stringify((await entities())[0]);
+  await page.fill('[data-testid=input-compass-radius]', '20');
+  await penPath(arcPts(C, 20, 200, 260, 3));
+  list = await entities();
+  ok(list.length === 2 && JSON.stringify(list[0]) === keep && list[1].r === 20, 'radio 20 mm: el arco anterior sigue intacto y el nuevo usa r = 20');
+
+  // Con zoom y tras desplazar la hoja, los arcos siguen en la misma circunferencia.
+  for (const steps of [['in', 'in'], ['out', 'out']]) {
+    await page.click('[data-testid=button-fit]');
+    for (const st of steps) await page.click(`[data-testid=button-zoom-${st}]`);
+    await penPath(arcPts(C, 20, 300, 340, 2));
+    const e = (await entities()).at(-1);
+    ok(e.type === 'arc' && e.r === 20 && e.c.x === 105 && e.c.y === 148.5, `zoom ${steps[0]}: arco con el mismo centro y radio`);
+  }
+  await page.click('[data-testid=button-fit]');
+  await page.click('[data-testid=tool-pan]'); await penDrag({ x: 30, y: 30 }, { x: 60, y: 50 }); await page.click('[data-testid=tool-compass]');
+  await penPath(arcPts(C, 20, 120, 160, 2));
+  ok((await entities()).at(-1).r === 20 && (await entities()).at(-1).c.x === 105, 'tras desplazar la hoja: mismo centro y radio');
+  const nNow = (await entities()).length;
+
+  // Palma: un toque del dedo mientras el lápiz traza se ignora; el arco se crea y la hoja no se mueve.
+  const vPalm = await view();
+  const palmPts = arcPts(C, 20, 20, 70, 2);
+  await penPath(palmPts.slice(0, 10), { release: false });
+  const palm = await toClient(150, 250);
+  await touch('touchStart', [{ x: palm.x, y: palm.y, id: 7 }]); await touch('touchMove', [{ x: palm.x + 40, y: palm.y + 30, id: 7 }]); await touch('touchEnd', []);
+  for (const q of palmPts.slice(10)) await pen('mouseMoved', await toClient(q.x, q.y));
+  await pen('mouseReleased', await toClient(palmPts.at(-1).x, palmPts.at(-1).y), 0); await page.waitForTimeout(30);
+  const vAfter = await view();
+  ok((await entities()).length === nNow + 1 && vAfter.tx === vPalm.tx && vAfter.ty === vPalm.ty, 'la palma durante el trazo no mueve la hoja ni corta el arco');
+
+  // Interrupción de Android a mitad del trazo: se conserva lo recorrido y se avisa.
+  await penPath(arcPts(C, 20, 180, 230, 2), { release: false });
+  await page.evaluate(() => {
+    const d = window.__downs.at(-1);
+    document.querySelector('[data-testid=drawing-sheet]').dispatchEvent(new PointerEvent('pointercancel', { pointerId: d.id, pointerType: d.t, bubbles: true, clientX: d.x, clientY: d.y }));
+  });
+  await pen('mouseReleased', await toClient(C.x - 20, C.y), 0);
+  list = await entities();
+  ok(list.length === nNow + 2 && list.at(-1).type === 'arc' && list.at(-1).r === 20 && list.at(-1).sweep > 40, 'interrupción: se conserva el arco recorrido');
+  ok((await page.locator('[data-testid=text-notice]').innerText()).includes('interrumpió'), 'y se avisa');
+
+  // «Trazar con el compás» desactivado u oculto: no se crea nada sobre la guía.
+  await page.click('[data-testid=toggle-compass-trace]');
+  await penPath(arcPts(C, 20, 0, 40, 2));
+  ok((await entities()).length === nNow + 2, 'sin «Trazar con el compás»: nada');
+  await page.click('[data-testid=toggle-compass-trace]');
+  await page.click('[data-testid=button-toggle-compass]');
+  await penPath(arcPts(C, 20, 0, 40, 2));
+  ok((await entities()).length === nNow + 2 && (await page.locator('[data-testid=text-notice]').innerText()).includes('oculto'), 'compás oculto: nada, y se indica');
+  await page.click('[data-testid=button-toggle-compass]');
+
+  // Con otra herramienta el lápiz no sigue la guía (Lápiz dibuja trazo libre).
+  await page.click('[data-testid=tool-pen]');
+  await penPath(arcPts(C, 20, 0, 40, 2));
+  ok((await entities()).at(-1).type === 'polyline', 'con Lápiz: trazo libre, la guía no interviene');
+  await page.click('[data-testid=button-undo]');
+
+  // Arco exacto por valores (acción explícita, se conserva).
+  await page.click('[data-testid=tool-compass]');
+  await page.click('[data-testid=toggle-compass-full]');
+  await page.fill('[data-testid=input-compass-start]', '0'); await page.fill('[data-testid=input-compass-end]', '90');
+  await page.click('[data-testid=button-place-line]');
+  const exact = (await entities()).at(-1);
+  ok(exact.type === 'arc' && exact.start === 0 && exact.sweep === 90 && exact.r === 20, 'Crear con estos valores: arco exacto de 0° a 90°');
+
+  // Cerca del borde: el arco que cruza la hoja se crea entero (y se recorta al mostrar).
+  await page.click('[data-testid=button-compass-relocate]');
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '20');
+  await page.click('[data-testid=button-compass-fix-center]');
+  await page.fill('[data-testid=input-compass-radius]', '30'); await page.click('[data-testid=button-compass-fix-radius]');
+  await page.click('[data-testid=button-fit]'); await page.click('[data-testid=button-zoom-out]'); await page.click('[data-testid=button-zoom-out]');
+  await penPath(arcPts({ x: 105, y: 20 }, 30, 0, 180, 3));
+  const edge = (await entities()).at(-1);
+  ok(edge.type === 'arc' && edge.r === 30 && edge.c.y === 20 && edge.sweep > 170, `arco que cruza el borde superior: se conserva entero (${edge.sweep.toFixed(1)}°)`);
+  ok((await page.locator('[data-testid=text-notice]').innerText()).includes('fuera de la hoja'), 'y se avisa de la parte exterior');
+  log('compás: trazo proyectado con radio exacto; arco o circunferencia (≥ 360°); banda, toques, zoom, desplazamiento, palma, interrupción, Deshacer y borde A4');
 }
 
 ok(pageErrors.length === 0, `errores de página: ${pageErrors.join(' | ')}`);

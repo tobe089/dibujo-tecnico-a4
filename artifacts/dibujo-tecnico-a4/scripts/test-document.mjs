@@ -383,6 +383,8 @@ ok(cutCount > 100, `debe haber suficientes cortes reales en la muestra (${cutCou
   ok(cancelOutcome('pen', 'pen', 25) === 'keep', 'trazo del lápiz interrumpido: se conserva');
   ok(cancelOutcome('pen', 'pen', 1) === 'discard', 'trazo de un solo punto: se descarta');
   ok(cancelOutcome('eraser', 'pen', 3) === 'keep', 'borrado ya visible: se conserva');
+  ok(cancelOutcome('compass-trace', 'pen', 2) === 'keep' && cancelOutcome('compass-trace', 'pen', 1) === 'discard', 'trazo sobre la guía del compás: se conserva si ya recorrió algo');
+  ok(cancelOutcome('compass-trace', 'touch', 9) === 'discard', 'trazo del dedo sobre la guía: se descarta');
   for (const tool of ['ruler', 'compass', 'point', 'protractor', 'parallel', 'perpendicular', 'select']) ok(cancelOutcome(tool, 'pen', 2) === 'discard', `${tool}: se descarta limpiamente`);
   ok(cancelOutcome('pen', 'touch', 50) === 'discard' && cancelOutcome('eraser', 'touch', 5) === 'discard', 'dedo: se descarta');
   ok(cancelOutcome('pen', 'mouse', 5) === 'keep', 'ratón: se conserva');
