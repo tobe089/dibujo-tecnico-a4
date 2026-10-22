@@ -7,6 +7,7 @@ import {
   LEGACY_PROJECT_ID, createProject, entitiesOutsideSheet, filterSelection, parseProject, projectToJson,
 } from '../src/lib/project.js';
 import { ConflictError, LEGACY_SETTING, openStore } from '../src/lib/storage.js';
+import { PROTRACTOR_DEFAULTS, sanitizeInstruments, sanitizeProtractor } from '../src/lib/instruments.js';
 import { createSaveManager } from '../src/lib/save-manager.js';
 import { JOURNAL_KEY, readJournal, resolveJournal, writeJournal } from '../src/lib/journal.js';
 
@@ -86,6 +87,36 @@ function sampleEntities(nPoly = 3, nPts = 50) {
   ok(v2.source === 'v2' && v2.project.entities[0].r === 2 && v2.project.sheet.margins.top === 12, 'documento v2 → proyecto');
   const v1 = parseProject({ strokes: [{ id: 'L', kind: 'line', points: [{ x: 1.5, y: 2 }, { x: 3, y: 4 }] }], margins: {} });
   ok(v1.source === 'v1' && v1.project.entities[0].type === 'segment' && v1.project.entities[0].a.x === 1.5, 'dibujo v1 → proyecto');
+}
+
+// ───────── 1b) Transportador: configuración guardada con el proyecto ─────────
+{
+  const p = createProject({ name: 'Transportador' });
+  eq(p.instruments.protractor, { ...PROTRACTOR_DEFAULTS }, 'proyecto nuevo: transportador sin colocar');
+  const prot = { visible: true, pose: { x: 20.25, y: 140.123456789, rotation: 37.5 }, angle: 37.5, cw: true, rayLength: 62.75, baseRay: false, mark: false };
+  p.instruments = { ...p.instruments, protractor: prot };
+  const back = parseProject(projectToJson(p)).project;
+  eq(back.instruments.protractor, prot, 'JSON: el transportador vuelve con los mismos valores');
+  ok(Object.is(back.instruments.protractor.pose.y, 140.123456789), 'la pose no se redondea');
+  // Proyectos v3 anteriores solo guardaban { visible }.
+  const old = parseProject({ format: 'dibujo-tecnico-a4/proyecto', version: 3, entities: [], instruments: { ruler: { visible: true, extra: 1 }, protractor: { visible: false } } }).project;
+  eq(old.instruments.protractor, { ...PROTRACTOR_DEFAULTS }, 'v3 anterior: el transportador toma los valores por defecto');
+  ok(old.instruments.ruler.visible === true && old.instruments.ruler.extra === 1, 'la regla conserva su configuración como antes');
+  ok(parseProject({ format: 'dibujo-tecnico-a4/proyecto', version: 3, entities: [] }).project.instruments.protractor.pose === null, 'sin instrumentos: transportador sin colocar');
+  // Valores no válidos: se descarta cada campo por separado, sin inventar una pose.
+  const bad = sanitizeProtractor({ visible: 'sí', pose: { x: NaN, y: 3, rotation: 0 }, angle: 'x', cw: 1, rayLength: -4, baseRay: null, mark: false });
+  eq(bad, { ...PROTRACTOR_DEFAULTS, mark: false }, 'campos no válidos → valores por defecto');
+  ok(sanitizeProtractor({ pose: { x: 1, y: 2 } }).pose === null, 'pose sin giro → sin colocar');
+  ok(sanitizeProtractor({ pose: { x: 1, y: 2, rotation: 725.5 } }).pose.rotation === 725.5, 'el giro guardado no se normaliza');
+  eq(sanitizeInstruments(null).protractor, { ...PROTRACTOR_DEFAULTS }, 'instrumentos ausentes');
+  ok(sanitizeInstruments({ protractor: prot }).protractor !== prot, 'se devuelve una copia, no el objeto leído');
+  // IndexedDB (base aislada): guardar y reabrir.
+  const store = await freshStore();
+  const rec = await store.newProject({ name: 'Con transportador' });
+  const loaded = await store.load(rec.id);
+  await store.save({ ...loaded, instruments: { ...loaded.instruments, protractor: prot } }, loaded.revision);
+  eq((await store.load(rec.id)).instruments.protractor, prot, 'IndexedDB: el transportador se guarda y se restaura');
+  store.close();
 }
 
 // ───────── 2) IndexedDB: crear, listar, abrir, guardar con revisión ─────────

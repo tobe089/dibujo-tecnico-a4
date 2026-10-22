@@ -14,6 +14,7 @@ import {
   type Entity, type EntityPatch, type History, type Margins, type Pt,
 } from '@/lib/document.js';
 import { createProject, entitiesOutsideSheet, filterSelection, projectToJson, type Project } from '@/lib/project.js';
+import { PROTRACTOR_DEFAULTS, type ProtractorState } from '@/lib/instruments.js';
 import type { Store } from '@/lib/storage.js';
 import { createSaveManager, type SaveManager, type SaveStatus } from '@/lib/save-manager.js';
 import { clearJournal, writeJournal } from '@/lib/journal.js';
@@ -154,14 +155,17 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   const [compEnd, setCompEnd] = useState('90');
   const [compX, setCompX] = useState('');
   const [compY, setCompY] = useState('');
-  // Transportador
-  const [protVertex, setProtVertex] = useState<Pt | null>(null);
-  const [protBase, setProtBase] = useState(0);
-  const [protAngle, setProtAngle] = useState('60');
-  const [protLen, setProtLen] = useState('50');
-  const [protCw, setProtCw] = useState(false);
-  const [protBaseRay, setProtBaseRay] = useState(true);
-  const [protMark, setProtMark] = useState(true);
+  // Transportador: es un instrumento, no una construcción. Su estado no depende de la herramienta activa,
+  // sobrevive al cambiar de herramienta y al crear, y se guarda con el proyecto (instruments.protractor).
+  const savedProt = project.instruments.protractor;
+  const [protVisible, setProtVisible] = useState(savedProt.visible);
+  const [protVertex, setProtVertex] = useState<Pt | null>(savedProt.pose ? { x: savedProt.pose.x, y: savedProt.pose.y } : null);
+  const [protBase, setProtBase] = useState(savedProt.pose ? savedProt.pose.rotation : 0);
+  const [protAngle, setProtAngle] = useState(String(savedProt.angle));
+  const [protLen, setProtLen] = useState(String(savedProt.rayLength));
+  const [protCw, setProtCw] = useState(savedProt.cw);
+  const [protBaseRay, setProtBaseRay] = useState(savedProt.baseRay);
+  const [protMark, setProtMark] = useState(savedProt.mark);
   // Paralelas y perpendiculares
   const [relRef, setRelRef] = useState<string | null>(null);
   const [relPoint, setRelPoint] = useState<Pt | null>(null);
@@ -231,8 +235,18 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   // ── Guardado en la biblioteca (IndexedDB) ──
   // El proyecto que se guarda se construye en el momento de escribir, con el estado más reciente.
   const revisionRef = useRef(project.revision);
-  const latest = useRef({ entities, meta, orientation, selectedId });
-  latest.current = { entities, meta, orientation, selectedId };
+  // Configuración del transportador tal como se guarda. Un campo numérico a medio escribir no sustituye el valor.
+  const protractor = useMemo((): ProtractorState => {
+    const angle = toNum(protAngle), rayLength = toNum(protLen);
+    return {
+      visible: protVisible, pose: protVertex ? { x: protVertex.x, y: protVertex.y, rotation: protBase } : null,
+      angle: Number.isFinite(angle) ? angle : PROTRACTOR_DEFAULTS.angle,
+      rayLength: Number.isFinite(rayLength) && rayLength > 0 ? rayLength : PROTRACTOR_DEFAULTS.rayLength,
+      cw: protCw, baseRay: protBaseRay, mark: protMark,
+    };
+  }, [protVisible, protVertex, protBase, protAngle, protLen, protCw, protBaseRay, protMark]);
+  const latest = useRef({ entities, meta, orientation, selectedId, protractor });
+  latest.current = { entities, meta, orientation, selectedId, protractor };
   const snapshot = useCallback((): Project => {
     const cur = latest.current;
     const v = viewRef.current;
@@ -247,6 +261,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
       sheet: { ...project.sheet, orientation: cur.orientation, margins: cur.meta.margins },
       style: { color: cur.meta.color, width: cur.meta.width },
       view: savedView, selection: cur.selectedId ? filterSelection([cur.selectedId], cur.entities) : [],
+      instruments: { ...project.instruments, protractor: cur.protractor },
     };
   }, [project]);
   const managerRef = useRef<SaveManager | null>(null);
@@ -269,12 +284,12 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     managerRef.current = manager;
     return () => { manager.dispose(); managerRef.current = null; };
   }, [store, project.id, snapshot, tabId]);
-  // Cada operación terminada (geometría, hoja, márgenes, estilo o selección) programa el guardado.
+  // Cada operación terminada (geometría, hoja, márgenes, estilo, selección o instrumentos) programa el guardado.
   const firstChange = useRef(true);
   useEffect(() => {
     if (firstChange.current) { firstChange.current = false; return; }
     managerRef.current?.changed();
-  }, [entities, meta, orientation, selectedId]);
+  }, [entities, meta, orientation, selectedId, protractor]);
   // La vista (centro y zoom) no es geometría: no marca cambios, pero se guarda al salir si cambió.
   const lastSavedView = useRef(JSON.stringify(project.view));
   // Otras pestañas: si guardan este proyecto, se recarga (sin cambios aquí) o se marca el conflicto (con cambios).
@@ -314,11 +329,19 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     setHistory(createHistory(fresh.entities));
     setMeta({ margins: fresh.sheet.margins, color: fresh.style.color, width: fresh.style.width });
     setOrientation(fresh.sheet.orientation);
+    applyProtractor(fresh.instruments.protractor);
     setSelectedId(null); setLastCreatedId(null);
     firstChange.current = true;
     managerRef.current?.resetClean();
     setNotice(message);
   };
+  function applyProtractor(p: ProtractorState) {
+    setProtVisible(p.visible);
+    setProtVertex(p.pose ? { x: p.pose.x, y: p.pose.y } : null);
+    setProtBase(p.pose ? p.pose.rotation : 0);
+    setProtAngle(String(p.angle)); setProtLen(String(p.rayLength));
+    setProtCw(p.cw); setProtBaseRay(p.baseRay); setProtMark(p.mark);
+  }
   const saveNow = async () => { await managerRef.current?.flush(); void refreshThumbnail(); };
   const refreshThumbnail = async () => {
     try { await store.setThumbnail(project.id, await makeThumbnail(latest.current.entities, sheetFor(latest.current.orientation))); } catch { /* la miniatura no es crítica */ }
@@ -337,6 +360,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     const copy = { ...createProject({ name: `${project.name} (copia)`, orientation: latest.current.orientation }), entities: latest.current.entities };
     copy.sheet.margins = latest.current.meta.margins;
     copy.style = { color: latest.current.meta.color, width: latest.current.meta.width };
+    copy.instruments = { ...copy.instruments, protractor: latest.current.protractor };
     try {
       await store.create(copy, { thumbnail: await makeThumbnail(copy.entities, sheetFor(copy.sheet.orientation)).catch(() => null) });
       managerRef.current?.resetClean();
@@ -368,12 +392,15 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   const resetConstruction = useCallback(() => {
     setRuleStart(null);
     setCompCenter(null); setCompArcStart(null);
-    setProtVertex(null);
     setRelRef(null); setRelPoint(null);
     setNotice('');
     cancelGesture();
   }, [cancelGesture]);
-  const chooseTool = (next: Tool) => { resetConstruction(); setTool(next); setLastCreatedId(null); setEditError(null); if (next !== 'select') setSelectedId(null); };
+  const chooseTool = (next: Tool) => {
+    resetConstruction(); setTool(next); setLastCreatedId(null); setEditError(null);
+    if (next !== 'select') setSelectedId(null);
+    if (next === 'protractor') setProtVisible(true); // al activar el instrumento se presenta sobre la hoja
+  };
 
   const deleteIds = useCallback((ids: string[]) => {
     commit(removeEntities(entitiesRef.current, ids));
@@ -537,8 +564,8 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
         break;
       }
       case 'protractor':
-        if (!protVertex) { if (!outside(tap)) setProtVertex(pt(tap)); }
-        else if (segmentLength(protVertex, end) > 0) setProtBase(segmentAngle(protVertex, end));
+        if (!protVertex) { if (!outside(tap)) { setProtVertex(pt(tap)); setProtVisible(true); } }
+        else if (segmentLength(protVertex, end) > 0) { setProtBase(segmentAngle(protVertex, end)); setProtVisible(true); }
         break;
       case 'parallel':
       case 'perpendicular':
@@ -676,10 +703,8 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   })();
   const commitPending = () => {
     if (!pending || pending.error || !pending.entities.length) return;
-    if (tryCreate(pending.entities)) {
-      if (tool === 'protractor') setProtVertex(null);
-      else { setRelPoint(null); if (parallelDistance) setRelRef(null); }
-    }
+    // El transportador sigue colocado después de crear; solo se reinician las construcciones de un solo uso.
+    if (tryCreate(pending.entities) && tool !== 'protractor') { setRelPoint(null); if (parallelDistance) setRelRef(null); }
   };
 
   // Regla: crear por longitud y ángulo / fijar inicio por coordenadas.
@@ -830,8 +855,10 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     <line x1={p.x} y1={p.y - 7 * px} x2={p.x} y2={p.y + 7 * px} stroke="#cf6349" strokeWidth={1.4 * px} />
   </g>;
 
-  const protractorOverlay = (() => {
-    if (tool !== 'protractor' || !protVertex) return null;
+  // Se dibuja con cualquier herramienta mientras esté visible; no recibe eventos, así que no impide dibujar debajo.
+  // Solo se recalcula si cambia el transportador (no en cada movimiento del lápiz).
+  const protractorOverlay = useMemo(() => {
+    if (!protVisible || !protVertex) return null;
     const sign = protCw ? -1 : 1;
     const outer = 42;
     const ticks = [];
@@ -850,19 +877,19 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     const angle = toNum(protAngle);
     const pointer = Number.isFinite(angle) ? pointAt(protVertex, protBase + sign * angle, outer + 6) : null;
     const baseEnd = pointAt(protVertex, protBase, outer + 6);
-    return <g pointerEvents="none">
+    return <g pointerEvents="none" data-testid="protractor-overlay" data-x={protVertex.x} data-y={protVertex.y} data-base={protBase} data-angle={angle} data-cw={String(protCw)}>
       <path d={`${edge.map((p, i) => `${i ? 'L' : 'M'} ${n(p.x)} ${n(p.y)}`).join(' ')} Z`} fill="#dfeeea" fillOpacity=".38" stroke="#4d6b72" strokeWidth=".2" />
       {ticks}{labels}
       <line x1={protVertex.x} y1={protVertex.y} x2={baseEnd.x} y2={baseEnd.y} stroke="#8aa3a8" strokeWidth=".2" strokeDasharray="1.2 .8" />
       {pointer && <line x1={protVertex.x} y1={protVertex.y} x2={pointer.x} y2={pointer.y} stroke="#cf6349" strokeWidth=".3" />}
     </g>;
-  })();
+  }, [protVisible, protVertex, protBase, protCw, protAngle]);
 
   // ── Paneles ──
   const errorLine = (p: Pending | null) => (p?.error ? <div className="notice" data-testid="text-construction-error">{p.error}</div> : null);
-  const createRow = (p: Pending | null, onCreate: () => void, label = 'Crear') => <div className="create-row">
+  const createRow = (p: Pending | null, onCreate: () => void, label = 'Crear', onReset: () => void = resetConstruction) => <div className="create-row">
     <button className="btn primary" onClick={onCreate} disabled={!p || !!p.error || !p.entities.length} data-testid="button-place-line"><Check size={14} />{label}</button>
-    <button className="btn" onClick={resetConstruction} data-testid="button-reset-construction">Reiniciar</button>
+    <button className="btn" onClick={onReset} data-testid="button-reset-construction">Reiniciar</button>
   </div>;
   const noticeLine = notice ? <div className="notice" data-testid="text-notice">{notice}</div> : null;
   const liveLine = livePreview ? <div className="hint-small mono-line" data-testid="text-live">Vista previa: {livePreview.label}</div> : null;
@@ -989,8 +1016,9 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
             <div className="section-head">Transportador · ángulo exacto</div>
             <div className="rule-box" data-testid="status-protractor">
               <b>{!protVertex ? '01 / Marca el vértice' : '02 / Base y ángulo'}</b>
-              {!protVertex ? 'Toca el vértice del ángulo.' : 'Toca un punto para orientar el rayo base (0° del transportador), o escribe su dirección.'}
+              {!protVertex ? 'Toca el vértice del ángulo.' : 'Toca un punto para orientar el rayo base (0° del transportador), o escribe su dirección. Sigue colocado al cambiar de herramienta.'}
               {noticeLine}
+              {protVertex && <Toggle checked={protVisible} onChange={setProtVisible} label="Mostrar transportador" testid="toggle-protractor-visible" />}
               {protVertex && <div className="field-stack">
                 <ExactField key={`base-${protVertex.x}-${protVertex.y}`} label="Dirección del rayo base" unit="°" value={protBase} onCommit={setProtBase} testid="input-protractor-base" />
                 <button className="btn" onClick={() => setProtBase(b => normalizeDeg(b + 180))} data-testid="button-protractor-flip-base">Invertir base (+180°)</button>
@@ -1000,7 +1028,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
                 <Toggle checked={protBaseRay} onChange={setProtBaseRay} label="Dibujar también el rayo base" testid="toggle-protractor-base-ray" />
                 <Toggle checked={protMark} onChange={setProtMark} label="Marcar el arco del ángulo" testid="toggle-protractor-mark" />
                 {errorLine(pending)}
-                {createRow(pending, commitPending)}
+                {createRow(pending, commitPending, 'Crear', () => { resetConstruction(); setProtVertex(null); })}
               </div>}
             </div>
           </section>}
@@ -1088,6 +1116,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
                 <button className="btn small" onClick={goRealScale} data-testid="button-real-scale" aria-label="Escala real 1:1">1:1</button>
                 <button className="btn small" onClick={() => { setCalMeasured(''); setModal('calibrate'); }} data-testid="button-calibrate">Calibrar</button>
               </>}
+              {protVertex && <button className={`btn small ${protVisible ? 'active' : ''}`} onClick={() => setProtVisible(v => !v)} aria-pressed={protVisible} aria-label={protVisible ? 'Ocultar transportador' : 'Mostrar transportador'} data-testid="button-toggle-protractor"><Triangle size={14} /><span className="export-label">Transportador</span></button>}
               <button className="icon-btn" aria-label="Alejar" onClick={() => zoomCentered(1 / 1.25)} data-testid="button-zoom-out"><ZoomOut size={17} /></button>
               <span className="zoom-readout" data-testid="text-zoom">{Math.round(view.scale / fitScale * 100)}%</span>
               <button className="icon-btn" aria-label="Acercar" onClick={() => zoomCentered(1.25)} data-testid="button-zoom-in"><ZoomIn size={17} /></button>

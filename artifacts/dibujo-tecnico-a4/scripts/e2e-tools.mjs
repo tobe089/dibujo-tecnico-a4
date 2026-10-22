@@ -501,6 +501,75 @@ async function systemCancel() {
   log('cancelación: lápiz conserva lo dibujado; construcciones y dedo se descartan limpiamente');
 }
 
+// ───────── 15) Transportador persistente: no depende de la herramienta activa ─────────
+{
+  await fresh();
+  const protAttrs = () => page.evaluate(() => {
+    const g = document.querySelector('[data-testid=protractor-overlay]');
+    return g ? { x: Number(g.dataset.x), y: Number(g.dataset.y), base: Number(g.dataset.base), angle: Number(g.dataset.angle), cw: g.dataset.cw } : null;
+  });
+  await page.click('[data-testid=tool-protractor]');
+  await penTap(60.5, 150.25);
+  const vP = await view(); const vertex = clientToDoc(vP, await lastDown());
+  const base = page.locator('[data-testid=input-protractor-base]');
+  await base.click(); await base.fill('15,5'); await base.press('Enter');
+  await page.fill('[data-testid=input-protractor-angle]', '37,5');
+  await page.click('[data-testid=seg-protractor-dir-cw]');
+  const placed = await protAttrs();
+  ok(placed && placed.x === vertex.x && placed.y === vertex.y && placed.base === 15.5 && placed.angle === 37.5 && placed.cw === 'true', `transportador colocado en el punto tocado (${JSON.stringify(placed)})`);
+
+  // Cambiar a Lápiz: sigue visible y con los mismos valores; dibujar encima no lo modifica.
+  await page.click('[data-testid=tool-pen]');
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'al elegir Lápiz el transportador sigue visible e idéntico');
+  await penDrag({ x: 40, y: 140 }, { x: 110, y: 165 });
+  let list = await entities();
+  ok(list.length === 1 && list[0].type === 'polyline', 'con el transportador visible, el lápiz dibuja debajo');
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'dibujar no mueve ni cambia el transportador');
+  for (const t of ['tool-ruler', 'tool-eraser', 'tool-select', 'tool-pan']) await page.click(`[data-testid=${t}]`);
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'tampoco cambia al pasar por otras herramientas');
+  await page.keyboard.press('Escape');
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'Escape no quita el transportador');
+
+  // Crear: el transportador sigue colocado; Deshacer quita la construcción, no el instrumento.
+  await page.click('[data-testid=tool-protractor]');
+  await page.click('[data-testid=button-place-line]');
+  list = await entities();
+  ok(list.length === 4 && list.filter((e) => e.type === 'segment').length === 2 && list.some((e) => e.type === 'arc'), 'Crear añade los dos rayos y el arco');
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'después de crear, el transportador sigue colocado');
+  await page.click('[data-testid=button-undo]');
+  ok((await entities()).length === 1 && JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'Deshacer quita la construcción y no toca el transportador');
+
+  // Ocultar y mostrar (barra de la hoja, con cualquier herramienta) conserva la configuración.
+  await page.click('[data-testid=tool-pen]');
+  await page.click('[data-testid=button-toggle-protractor]');
+  ok(await protAttrs() === null, 'ocultar: deja de verse');
+  await waitSaved();
+  let saved = (await readProject()).instruments.protractor;
+  ok(saved.visible === false && saved.pose.x === vertex.x && saved.pose.rotation === 15.5 && saved.angle === 37.5 && saved.cw === true, 'oculto: la configuración se guarda intacta');
+  ok((await entities()).length === 1, 'ocultarlo no cambia la geometría');
+  await page.click('[data-testid=button-toggle-protractor]');
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'mostrar: vuelve con los mismos valores');
+  await waitSaved();
+  saved = (await readProject()).instruments.protractor;
+  ok(saved.visible === true && saved.pose.x === vertex.x && saved.pose.y === vertex.y, 'visible: guardado con su pose exacta');
+
+  // Cerrar y reabrir desde la biblioteca, y recargar la página.
+  await page.click('[data-testid=button-library]'); await page.waitForSelector('[data-testid=library-all]');
+  await page.locator('[data-testid=library-all] .lib-open').first().click(); await afterOpen();
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'reabrir el proyecto restaura el transportador');
+  await reloadAndReopen();
+  ok(JSON.stringify(await protAttrs()) === JSON.stringify(placed), 'recargar la página restaura el transportador');
+  ok((await page.locator('[data-testid=tool-pen].active').count()) === 1, 'se restaura aunque la herramienta activa sea Lápiz');
+
+  // Reiniciar (panel del transportador) lo quita a propósito.
+  await page.click('[data-testid=tool-protractor]');
+  await page.click('[data-testid=button-reset-construction]');
+  ok(await protAttrs() === null && (await page.locator('[data-testid=button-toggle-protractor]').count()) === 0, 'Reiniciar quita el transportador');
+  await waitSaved();
+  ok((await readProject()).instruments.protractor.pose === null, 'y se guarda sin colocar');
+  log('transportador: sobrevive a Lápiz, otras herramientas, Escape, Crear y Deshacer; ocultar/mostrar; se guarda y se restaura');
+}
+
 ok(pageErrors.length === 0, `errores de página: ${pageErrors.join(' | ')}`);
 await browser.close();
 console.log(`E2E OK: ${checks} comprobaciones en Chromium con eventos de lápiz y táctiles simulados.`);

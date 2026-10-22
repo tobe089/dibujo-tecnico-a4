@@ -5,6 +5,7 @@
 //   sheet        hoja A4 y su orientación; cambiar la orientación NO transforma ninguna coordenada
 //   view         cómo se estaba mirando (centro en mm, zoom relativo al encaje, rotación): no es geometría
 //   selection    ids seleccionados al cerrar; al abrir se descartan los que ya no existan
+//   instruments  configuración de regla, compás y transportador (instruments.js): no es geometría
 // En archivo y en IndexedDB los trazos libres se guardan "empaquetados" (listas planas de números): ocupan la
 // mitad que los objetos {x,y,p} y conservan cada número exactamente (JSON y IndexedDB guardan el double tal cual).
 
@@ -12,6 +13,9 @@ import { sheetFor } from './geometry.js';
 import {
   DEFAULT_COLOR, DEFAULT_MARGINS, DEFAULT_WIDTH, entityInsideSheet, makeId, migrateV1, sanitizeEntity,
 } from './document.js';
+import { defaultInstruments, sanitizeInstruments } from './instruments.js';
+
+export { defaultInstruments };
 
 export const PROJECT_FORMAT = 'dibujo-tecnico-a4/proyecto';
 export const PROJECT_VERSION = 3;
@@ -24,10 +28,6 @@ const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const validName = (n) => (typeof n === 'string' && n.trim() ? n.trim().slice(0, 120) : 'Sin título');
 const validDate = (d, fallback) => (typeof d === 'string' && !Number.isNaN(Date.parse(d)) ? d : fallback);
 
-export function defaultInstruments() {
-  return { ruler: { visible: false }, compass: { visible: false }, protractor: { visible: false } };
-}
-
 function sanitizeMargins(m) {
   const out = { ...DEFAULT_MARGINS };
   if (isObj(m)) for (const k of Object.keys(out)) if (isNum(m[k])) out[k] = Math.max(0, Math.min(40, m[k]));
@@ -37,14 +37,6 @@ function sanitizeMargins(m) {
 function sanitizeView(v) {
   if (!isObj(v) || !isObj(v.center) || !isNum(v.center.x) || !isNum(v.center.y) || !isNum(v.zoom) || !(v.zoom > 0)) return null;
   return { center: { x: v.center.x, y: v.center.y }, zoom: v.zoom, rotation: isNum(v.rotation) ? v.rotation : 0 };
-}
-
-function sanitizeInstruments(ins) {
-  const base = defaultInstruments();
-  if (!isObj(ins)) return base;
-  // Se conserva la configuración guardada de cada instrumento (las etapas siguientes la amplían).
-  for (const k of Object.keys(base)) if (isObj(ins[k])) base[k] = { ...ins[k], visible: ins[k].visible === true };
-  return base;
 }
 
 export function createProject({ name, orientation = 'portrait', id = makeId(), now = new Date().toISOString() } = {}) {
