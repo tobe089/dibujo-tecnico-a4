@@ -1,7 +1,7 @@
 import type { Entity, Margins } from './document.js';
 import type { Orientation, Sheet } from './geometry.js';
 import type { Instruments } from './instruments.js';
-export type { InstrumentState, Instruments, Pose, ProtractorState } from './instruments.js';
+export type { CompassState, InstrumentState, Instruments, Pose, ProtractorState } from './instruments.js';
 export type ProjectView = { center: { x: number; y: number }; zoom: number; rotation: number };
 export type Project = {
   format: string; version: 3; id: string; name: string; createdAt: string; modifiedAt: string; revision: number;

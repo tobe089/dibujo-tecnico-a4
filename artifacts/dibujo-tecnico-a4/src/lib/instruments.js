@@ -14,8 +14,16 @@ export const PROTRACTOR_DEFAULTS = Object.freeze({
   visible: false, pose: null, angle: 60, cw: false, rayLength: 50, baseRay: true, mark: true,
 });
 
+/**
+ * Compás como guía de trazado: centro en pose.x/pose.y, dirección del último radio definido en pose.rotation,
+ * radio exacto en mm y si el lápiz traza siguiendo la guía. Definirlo nunca crea geometría.
+ */
+export const COMPASS_DEFAULTS = Object.freeze({ visible: false, pose: null, radius: 30, trace: true });
+/** Radio máximo admitido (mm), el mismo límite que la creación por valores. */
+export const COMPASS_MAX_RADIUS = 500;
+
 export function defaultInstruments() {
-  return { ruler: { visible: false }, compass: { visible: false }, protractor: { ...PROTRACTOR_DEFAULTS } };
+  return { ruler: { visible: false }, compass: { ...COMPASS_DEFAULTS }, protractor: { ...PROTRACTOR_DEFAULTS } };
 }
 
 /** Pose exacta, o null si falta algún valor o no es un número finito. No redondea ni normaliza. */
@@ -39,11 +47,24 @@ export function sanitizeProtractor(p) {
   };
 }
 
+/** Configuración del compás con cada campo validado; lo no válido toma el valor por defecto. */
+export function sanitizeCompass(p) {
+  const d = COMPASS_DEFAULTS;
+  if (!isObj(p)) return { ...d };
+  return {
+    visible: p.visible === true,
+    pose: sanitizePose(p.pose),
+    radius: isNum(p.radius) && p.radius > 0 && p.radius <= COMPASS_MAX_RADIUS ? p.radius : d.radius,
+    trace: bool(p.trace, d.trace),
+  };
+}
+
 export function sanitizeInstruments(ins) {
   const base = defaultInstruments();
   if (!isObj(ins)) return base;
-  // Regla y compás: se conserva su configuración guardada (las etapas siguientes la amplían y la validan).
-  for (const k of ['ruler', 'compass']) if (isObj(ins[k])) base[k] = { ...ins[k], visible: ins[k].visible === true };
+  // Regla: se conserva su configuración guardada (la etapa de la regla la ampliará y la validará).
+  if (isObj(ins.ruler)) base.ruler = { ...ins.ruler, visible: ins.ruler.visible === true };
+  base.compass = sanitizeCompass(ins.compass);
   base.protractor = sanitizeProtractor(ins.protractor);
   return base;
 }

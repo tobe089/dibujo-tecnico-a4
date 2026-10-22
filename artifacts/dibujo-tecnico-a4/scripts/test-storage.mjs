@@ -7,7 +7,7 @@ import {
   LEGACY_PROJECT_ID, createProject, entitiesOutsideSheet, filterSelection, parseProject, projectToJson,
 } from '../src/lib/project.js';
 import { ConflictError, LEGACY_SETTING, openStore } from '../src/lib/storage.js';
-import { PROTRACTOR_DEFAULTS, sanitizeInstruments, sanitizeProtractor } from '../src/lib/instruments.js';
+import { COMPASS_DEFAULTS, PROTRACTOR_DEFAULTS, sanitizeCompass, sanitizeInstruments, sanitizeProtractor } from '../src/lib/instruments.js';
 import { createSaveManager } from '../src/lib/save-manager.js';
 import { JOURNAL_KEY, readJournal, resolveJournal, writeJournal } from '../src/lib/journal.js';
 
@@ -116,6 +116,31 @@ function sampleEntities(nPoly = 3, nPts = 50) {
   const loaded = await store.load(rec.id);
   await store.save({ ...loaded, instruments: { ...loaded.instruments, protractor: prot } }, loaded.revision);
   eq((await store.load(rec.id)).instruments.protractor, prot, 'IndexedDB: el transportador se guarda y se restaura');
+  store.close();
+}
+
+// ───────── 1c) Compás: guía de trazado guardada con el proyecto ─────────
+{
+  const p = createProject({ name: 'Compás' });
+  eq(p.instruments.compass, { ...COMPASS_DEFAULTS }, 'proyecto nuevo: compás sin colocar');
+  const comp = { visible: true, pose: { x: 105.123456789, y: 20.5, rotation: 33.25 }, radius: 37.5, trace: false };
+  p.instruments = { ...p.instruments, compass: comp };
+  const back = parseProject(projectToJson(p)).project;
+  eq(back.instruments.compass, comp, 'JSON: el compás vuelve con los mismos valores');
+  ok(Object.is(back.instruments.compass.pose.x, 105.123456789) && Object.is(back.instruments.compass.radius, 37.5), 'centro y radio sin redondear');
+  eq(back.instruments.protractor, p.instruments.protractor, 'el transportador no se ve afectado');
+  const old = parseProject({ format: 'dibujo-tecnico-a4/proyecto', version: 3, entities: [], instruments: { compass: { visible: false } } }).project;
+  eq(old.instruments.compass, { ...COMPASS_DEFAULTS }, 'v3 anterior ({ visible }): el compás toma los valores por defecto');
+  eq(sanitizeCompass({ visible: 1, pose: { x: 1, y: 2, rotation: 'a' }, radius: -3, trace: 'no' }), { ...COMPASS_DEFAULTS }, 'campos no válidos → valores por defecto');
+  ok(sanitizeCompass({ radius: 500 }).radius === 500 && sanitizeCompass({ radius: 500.0001 }).radius === COMPASS_DEFAULTS.radius, 'radio admitido hasta 500 mm');
+  ok(sanitizeCompass({ radius: 1e-7 }).radius === 1e-7, 'radio muy pequeño pero positivo se conserva tal cual');
+  ok(sanitizeInstruments({ compass: comp }).compass !== comp, 'se devuelve una copia, no el objeto leído');
+  // IndexedDB (base aislada).
+  const store = await freshStore();
+  const rec = await store.newProject({ name: 'Con compás' });
+  const loaded = await store.load(rec.id);
+  await store.save({ ...loaded, instruments: { ...loaded.instruments, compass: comp } }, loaded.revision);
+  eq((await store.load(rec.id)).instruments.compass, comp, 'IndexedDB: el compás se guarda y se restaura');
   store.close();
 }
 
