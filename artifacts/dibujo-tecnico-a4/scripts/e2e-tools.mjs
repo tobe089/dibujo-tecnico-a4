@@ -570,6 +570,80 @@ async function systemCancel() {
   log('transportador: sobrevive a Lápiz, otras herramientas, Escape, Crear y Deshacer; ocultar/mostrar; se guarda y se restaura');
 }
 
+// ───────── 16) Borrador: el tamaño (px de pantalla) determina exactamente lo que se borra, con cualquier zoom ─────────
+// Solo comprueba el comportamiento existente: radio en mm = tamaño en px / escala de la vista.
+{
+  await fresh();
+  const setEraserPx = (v) => page.$eval('[data-testid=input-eraser-size]', (el, value) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    set.call(el, String(value)); el.dispatchEvent(new Event('input', { bubbles: true }));
+  }, v);
+  // Segmento horizontal exacto (30, 100) → (180, 100) y circunferencia de centro (105, 200) y r = 40.
+  await page.click('[data-testid=tool-ruler]');
+  await page.fill('[data-testid=input-rule-x]', '30'); await page.fill('[data-testid=input-rule-y]', '100');
+  await page.click('[data-testid=button-rule-fix-start]');
+  await page.fill('[data-testid=input-rule-length]', '150'); await page.fill('[data-testid=input-rule-angle]', '0');
+  await page.click('[data-testid=button-place-line]');
+  await page.click('[data-testid=tool-compass]');
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '200');
+  await page.click('[data-testid=button-compass-fix-center]');
+  await page.fill('[data-testid=input-compass-radius]', '40');
+  await page.click('[data-testid=button-place-line]');
+  const base = await entities();
+  const seg = base.find((e) => e.type === 'segment'), circ = base.find((e) => e.type === 'circle');
+  ok(seg && seg.a.x === 30 && seg.b.x === 180 && seg.a.y === 100 && circ && circ.r === 40, 'figuras de referencia exactas');
+  await page.click('[data-testid=tool-eraser]');
+  ok((await page.locator('[data-testid=seg-eraser-mode-partial].on').count()) === 1, 'modo «Solo lo que toca»');
+
+  const gaps = [];
+  for (const zoom of [{ name: 'ajustada', steps: [] }, { name: '×1,56', steps: ['in', 'in'] }, { name: '×0,64', steps: ['out', 'out'] }]) {
+    await page.click('[data-testid=button-fit]');
+    for (const st of zoom.steps) await page.click(`[data-testid=button-zoom-${st}]`);
+    for (const px of [5, 30]) {
+      await setEraserPx(px);
+      const v = await view();
+      const r = px / v.scale;
+      const label = await page.locator('label[for=eraser-size] output').innerText();
+      ok(label.startsWith(`${px} px`) && label.includes(`${(r).toFixed(2).replace(/\.?0+$/, '')} mm`), `el control muestra ${px} px = ${r.toFixed(2)} mm (${label})`);
+      // Toque sobre el centro del segmento: se borra la cuerda del círculo de radio r que corta la recta.
+      await penTap(105, 100);
+      const P = clientToDoc(v, await lastDown());
+      const h = Math.sqrt(r * r - (P.y - 100) ** 2);
+      let list = await entities();
+      const pieces = list.filter((e) => e.type === 'segment').sort((a, b) => a.a.x - b.a.x);
+      ok(pieces.length === 2, `${zoom.name}, ${px} px: el segmento queda en dos trozos`);
+      ok(pieces[0].a.x === 30 && pieces[1].b.x === 180 && pieces.every((pc) => pc.a.y === 100 && pc.b.y === 100), `${zoom.name}, ${px} px: extremos exteriores y recta intactos`);
+      near(pieces[0].b.x, P.x - h, 1e-6, `${zoom.name}, ${px} px: fin del trozo izquierdo`);
+      near(pieces[1].a.x, P.x + h, 1e-6, `${zoom.name}, ${px} px: inicio del trozo derecho`);
+      gaps.push({ zoom: zoom.name, px, scale: v.scale, gap: pieces[1].a.x - pieces[0].b.x });
+      await page.click('[data-testid=button-undo]');
+      list = await entities();
+      ok(list.length === 2 && list.some((e) => e.id === seg.id && e.type === 'segment' && e.b.x === 180), 'Deshacer recupera el segmento');
+    }
+  }
+  for (let i = 0; i < gaps.length; i += 2) ok(gaps[i + 1].gap > gaps[i].gap, `${gaps[i].zoom}: 30 px borra más que 5 px (${gaps[i + 1].gap.toFixed(3)} > ${gaps[i].gap.toFixed(3)} mm)`);
+  ok(gaps[2].gap < gaps[0].gap && gaps[4].gap > gaps[0].gap, 'con el mismo tamaño en px, ampliar borra menos mm y alejar borra más');
+
+  // Circunferencia (vista ajustada): toque en su punto superior; el arco quitado sale de la distancia exacta al lápiz.
+  await page.click('[data-testid=button-fit]');
+  for (const px of [5, 30]) {
+    await setEraserPx(px);
+    const v = await view();
+    const r = px / v.scale;
+    await penTap(105, 160);
+    const P = clientToDoc(v, await lastDown());
+    const D = Math.hypot(P.x - 105, P.y - 200);
+    const removed = 2 * Math.acos((40 * 40 + D * D - r * r) / (2 * 40 * D)) * 180 / Math.PI;
+    const list = await entities();
+    const arc = list.find((e) => e.type === 'arc');
+    ok(arc && arc.r === 40 && arc.c.x === 105 && arc.c.y === 200, `${px} px: queda un arco con el mismo centro y radio`);
+    near(360 - arc.sweep, removed, 1e-6, `${px} px: ángulo borrado = el que cubre el borrador`);
+    await page.click('[data-testid=button-undo]');
+    ok((await entities()).some((e) => e.type === 'circle' && e.id === circ.id), 'Deshacer recupera la circunferencia');
+  }
+  log(`borrador: hueco exacto = 2·√(r² − d²), r = px / escala; ${gaps.map((g) => `${g.zoom} ${g.px}px → ${g.gap.toFixed(3)} mm`).join(', ')}`);
+}
+
 ok(pageErrors.length === 0, `errores de página: ${pageErrors.join(' | ')}`);
 await browser.close();
 console.log(`E2E OK: ${checks} comprobaciones en Chromium con eventos de lápiz y táctiles simulados.`);
