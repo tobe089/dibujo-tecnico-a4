@@ -4,6 +4,7 @@
 // No forma parte del flujo de CI (no hay navegador allí); se ejecuta a mano.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { PDFDocument } from 'pdf-lib';
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const URL_APP = process.env.E2E_URL || 'http://localhost:4173/';
@@ -642,6 +643,49 @@ async function systemCancel() {
     ok((await entities()).some((e) => e.type === 'circle' && e.id === circ.id), 'Deshacer recupera la circunferencia');
   }
   log(`borrador: hueco exacto = 2·√(r² − d²), r = px / escala; ${gaps.map((g) => `${g.zoom} ${g.px}px → ${g.gap.toFixed(3)} mm`).join(', ')}`);
+}
+
+// ───────── 17) Límites A4: se acepta lo que tiene una parte real dentro; se conserva entero y se recorta al mostrar ─────────
+{
+  await fresh();
+  await page.click('[data-testid=tool-compass]');
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '20');
+  await page.click('[data-testid=button-compass-fix-center]');
+  await page.fill('[data-testid=input-compass-radius]', '30');
+  await page.click('[data-testid=button-place-line]');
+  let list = await entities();
+  ok(list.length === 1 && list[0].type === 'circle' && list[0].c.x === 105 && list[0].c.y === 20 && list[0].r === 30, 'circunferencia que cruza el borde superior: creada entera, sin mover el centro ni cambiar el radio');
+  ok((await page.locator('[data-testid=text-notice]').innerText()).includes('fuera de la hoja'), 'se avisa de que una parte queda fuera');
+  ok(await page.evaluate((id) => !!document.querySelector(`[data-testid="entity-${id}"]`).closest('g[clip-path="url(#sheet-clip)"]'), list[0].id), 'en pantalla se dibuja recortada a la hoja');
+  // Rodear toda la hoja sin tocarla: no hay nada dentro → se rechaza.
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '148.5');
+  await page.click('[data-testid=button-compass-fix-center]');
+  await page.fill('[data-testid=input-compass-radius]', '400');
+  ok((await page.locator('[data-testid=text-construction-error]').innerText()).includes('totalmente fuera') && await page.locator('[data-testid=button-place-line]').isDisabled(), 'una circunferencia que rodea la hoja sin tocarla se rechaza');
+  ok((await entities()).length === 1, 'y no se crea');
+  // Exportaciones: A4 exacto; en el PNG se ve la parte de dentro (punto inferior de la circunferencia en (105, 50)).
+  await page.click('[data-testid=button-export]');
+  const [pdfDl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=button-export-pdf]')]);
+  const pdfPage = (await PDFDocument.load(fs.readFileSync(await pdfDl.path()))).getPage(0).getSize();
+  ok(Math.abs(pdfPage.width - 595.276) < 0.01 && Math.abs(pdfPage.height - 841.89) < 0.01, `PDF A4 (${pdfPage.width.toFixed(3)} × ${pdfPage.height.toFixed(3)} pt)`);
+  await page.click('[data-testid=button-export]');
+  const [pngDl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=button-export-png]')]);
+  const pngBuf = fs.readFileSync(await pngDl.path());
+  ok(pngBuf.readUInt32BE(16) === 2480 && pngBuf.readUInt32BE(20) === 3508, 'PNG 2480 × 3508');
+  const px = await page.evaluate(async (b64) => {
+    const bmp = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+    const cv = new OffscreenCanvas(bmp.width, bmp.height); const cx = cv.getContext('2d'); cx.drawImage(bmp, 0, 0);
+    const at = (x, y) => [...cx.getImageData(Math.round(x / 25.4 * 300), Math.round(y / 25.4 * 300), 1, 1).data];
+    return { on: at(105, 50), off: at(105.5, 62.5) }; // (105,5; 62,5): entre líneas de la cuadrícula
+  }, pngBuf.toString('base64'));
+  ok(px.on[0] < 120 && px.off[0] > 200, `PNG: la parte de dentro se dibuja (${px.on}) y el resto de la hoja queda en blanco (${px.off})`);
+  // Editar una propiedad de la figura que cruza el borde se acepta.
+  await page.click('[data-testid=tool-select]');
+  await penTap(105, 50);
+  await page.fill('[data-testid=edit-circle-r]', '32.5'); await page.press('[data-testid=edit-circle-r]', 'Enter');
+  list = await entities();
+  ok(list.length === 1 && list[0].r === 32.5 && list[0].c.y === 20, 'editar el radio de la figura que cruza el borde se acepta con el valor exacto');
+  log('límites A4: parte real dentro → se crea entera y se recorta al mostrar y exportar; totalmente fuera → se rechaza');
 }
 
 ok(pageErrors.length === 0, `errores de página: ${pageErrors.join(' | ')}`);

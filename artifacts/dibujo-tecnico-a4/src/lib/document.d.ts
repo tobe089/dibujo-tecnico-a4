@@ -39,6 +39,8 @@ export function entityBounds(e: Entity): Bounds;
 import type { Sheet } from './geometry.js';
 export function entityInsideSheet(e: Entity, eps?: number, sheet?: Sheet): boolean;
 export function pointInsideSheet(p: Pt, sheet?: Sheet): boolean;
+export const SHEET_MIN_MM: number;
+export function entityIntersectsSheet(e: Entity, sheet?: Sheet): boolean;
 export function distanceToEntity(p: Pt, e: Entity): number;
 export function hitTest(p: Pt, entities: Entity[], tolMm: number, filter?: (e: Entity) => boolean): Entity | null;
 export function entityLength(e: Entity): number;

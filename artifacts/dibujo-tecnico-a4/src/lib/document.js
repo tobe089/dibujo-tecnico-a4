@@ -199,6 +199,70 @@ export function pointInsideSheet(p, sheet = A4_PORTRAIT) {
   return isPt(p) && p.x >= 0 && p.x <= sheet.w && p.y >= 0 && p.y <= sheet.h;
 }
 
+/** Longitud mínima (mm) que debe caer dentro de la hoja para contar como visible: restos numéricos, no tolerancia. */
+export const SHEET_MIN_MM = 1e-6;
+const SHEET_EPS = 1e-9;
+const insideClosed = (p, sheet) => p.x >= -SHEET_EPS && p.x <= sheet.w + SHEET_EPS && p.y >= -SHEET_EPS && p.y <= sheet.h + SHEET_EPS;
+
+/** Parámetros [t0, t1] del tramo del segmento a→b dentro de la hoja (Liang–Barsky), o null. */
+function segmentSheetInterval(a, b, sheet) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, a.x], [dx, sheet.w - a.x], [-dy, a.y], [dy, sheet.h - a.y]]) {
+    if (p === 0) { if (q < 0) return null; continue; }
+    const t = q / p;
+    if (p < 0) { if (t > t1) return null; if (t > t0) t0 = t; } else { if (t < t0) return null; if (t < t1) t1 = t; }
+  }
+  return [t0, t1];
+}
+
+/** Ángulos (grados) en los que la circunferencia corta los cuatro bordes de la hoja. */
+function circleSheetCrossings(c, r, sheet) {
+  const out = [];
+  const deg = (rad) => normalizeDeg(rad * 180 / Math.PI);
+  for (const X of [0, sheet.w]) {
+    const k = (X - c.x) / r; // x = c.x + r·cos θ
+    if (k >= -1 && k <= 1) { const a = Math.acos(k); out.push(deg(a), deg(-a)); }
+  }
+  for (const Y of [0, sheet.h]) {
+    const k = (c.y - Y) / r; // y = c.y − r·sen θ (Y hacia abajo, 90° = arriba)
+    if (k >= -1 && k <= 1) { const a = Math.asin(k); out.push(deg(a), deg(Math.PI - a)); }
+  }
+  return out;
+}
+
+/**
+ * ¿Hay una parte real de la geometría dentro de la hoja? Se comprueba la geometría exacta (no su caja):
+ * un segmento debe tener un tramo de más de SHEET_MIN_MM dentro; una circunferencia o un arco, un trozo de
+ * curva de esa longitud. Un contacto tangente o en un solo punto no cuenta. No modifica la entidad.
+ */
+export function entityIntersectsSheet(e, sheet = A4_PORTRAIT) {
+  switch (e.type) {
+    case 'point': return isPt(e) && insideClosed(e, sheet);
+    case 'segment': {
+      const len = segmentLength(e.a, e.b);
+      const iv = segmentSheetInterval(e.a, e.b, sheet);
+      return !!iv && (iv[1] - iv[0]) * len > SHEET_MIN_MM;
+    }
+    case 'circle':
+    case 'arc': {
+      const start = e.type === 'arc' ? e.start : 0;
+      const sweep = e.type === 'arc' ? e.sweep : 360;
+      // Entre dos cortes consecutivos el arco está entero dentro o entero fuera: basta mirar su punto medio.
+      const cuts = circleSheetCrossings(e.c, e.r, sheet).map((q) => normalizeDeg(q - start)).filter((u) => u > 0 && u < sweep);
+      const marks = [0, ...cuts.sort((p, q) => p - q), sweep];
+      for (let i = 0; i + 1 < marks.length; i += 1) {
+        const span = marks[i + 1] - marks[i];
+        if (span * Math.PI * e.r / 180 > SHEET_MIN_MM && insideClosed(pointAt(e.c, start + marks[i] + span / 2, e.r), sheet)) return true;
+      }
+      return false;
+    }
+    case 'polyline':
+      return e.points.some((p, i) => (i === 0 ? insideClosed(p, sheet) : entityIntersectsSheet({ type: 'segment', a: e.points[i - 1], b: p }, sheet)));
+    default: return false;
+  }
+}
+
 /** Distancia exacta (mm) de p a la geometría de la entidad (al eje del trazo, sin grosor). */
 export function distanceToEntity(p, e) {
   switch (e.type) {
@@ -265,14 +329,15 @@ export function removeEntities(entities, ids) {
 
 /**
  * Sustituye la entidad `id` por la versión con `patch` aplicado. Devuelve
- * { entities, error } — si el resultado no es válido o se sale de la hoja, no cambia nada.
+ * { entities, error } — si el resultado no es válido o queda totalmente fuera de la hoja, no cambia nada.
+ * Una figura que queda solo en parte fuera se acepta tal cual (la pantalla y las exportaciones la recortan).
  */
 export function updateEntity(entities, id, patch, sheet = A4_PORTRAIT) {
   const index = entities.findIndex((e) => e.id === id);
   if (index < 0) return { entities, error: 'La entidad ya no existe.' };
   const next = sanitizeEntity({ ...entities[index], ...patch, id });
   if (!next) return { entities, error: 'Valores no válidos.' };
-  if (!entityInsideSheet(next, 1e-9, sheet)) return { entities, error: 'Queda fuera de la hoja A4.' };
+  if (!entityIntersectsSheet(next, sheet)) return { entities, error: 'Queda totalmente fuera de la hoja A4.' };
   const out = entities.slice();
   out[index] = next;
   return { entities: out, error: null };

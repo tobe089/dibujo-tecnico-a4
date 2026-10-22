@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { nearestOnSegment, pointAt, segmentAngle, segmentLength } from '../src/lib/geometry.js';
 import {
-  STORAGE_KEY_V1, STORAGE_KEY_V2, commitHistory, createHistory, distanceToEntity, entityBounds, entityInsideSheet,
+  STORAGE_KEY_V1, STORAGE_KEY_V2, commitHistory, createHistory, distanceToEntity, entityBounds, entityInsideSheet, entityIntersectsSheet,
   hitTest, loadFromStorage, migrateV1, parseDocument, redoHistory, removeEntities, sanitizeEntity, segmentWithAngle,
   segmentWithLength, serializeDocument, undoHistory, updateEntity,
 } from '../src/lib/document.js';
@@ -96,12 +96,68 @@ const inCapsule = (X, P, Q, r) => nearestOnSegment(X, P, Q).dist - r;
   const s2 = longer.entities[0];
   near(segmentLength(s2.a, s2.b), 80, 1e-12, 'longitud exacta'); near(segmentAngle(s2.a, s2.b), ang, 1e-9, 'ángulo intacto');
   ok(s2.a.x === seg.a.x && s2.a.y === seg.a.y, 'el inicio no se mueve');
-  ok(updateEntity(list, 's', segmentWithAngle(seg, 37.25)).error, 'girar fuera de la hoja se rechaza');
+  // Girar hasta que una parte salga por el borde superior: se acepta tal cual (solo se recorta al mostrar y exportar).
+  const tilted = updateEntity(list, 's', segmentWithAngle(seg, 37.25));
+  ok(!tilted.error && tilted.entities[0].b.y < 0, 'girar dejando una parte fuera de la hoja se acepta');
+  near(segmentAngle(tilted.entities[0].a, tilted.entities[0].b), 37.25, 1e-9, 'y conserva el ángulo exacto');
   const rotated = updateEntity(list, 's', segmentWithAngle(seg, 322.75)).entities[0];
   near(segmentAngle(rotated.a, rotated.b), 322.75, 1e-9, 'ángulo exacto'); near(segmentLength(rotated.a, rotated.b), segmentLength(seg.a, seg.b), 1e-12, 'longitud intacta');
-  const outside = updateEntity(list, 's', { b: { x: 300, y: 10 } });
-  ok(outside.error && outside.entities === list, 'edición fuera de la hoja rechazada sin cambios');
+  const partly = updateEntity(list, 's', { b: { x: 300, y: 10 } });
+  ok(!partly.error && partly.entities[0].b.x === 300, 'un extremo fuera de la hoja: se acepta sin mover el extremo');
+  const outside = updateEntity(list, 's', { a: { x: 250, y: 10 }, b: { x: 300, y: 10 } });
+  ok(outside.error && outside.entities === list, 'edición totalmente fuera de la hoja rechazada sin cambios');
+  const arcOut = { ...arc, c: { x: 105, y: 20 }, r: 30, start: 20, sweep: 60 };
+  ok(!updateEntity([arcOut], 'a', { color: '#ff0000' }).error, 'cambiar el color de un arco que cruza el borde se acepta');
   ok(removeEntities(list, ['s']).length === 1, 'eliminar por id');
+}
+
+// ───────── 2b) Parte real dentro de la hoja (geometría exacta, no caja envolvente) ─────────
+{
+  const st = { id: 'x', color: '#000000', width: 0.4 };
+  const L = { w: 297, h: 210 };
+  const yes = (e, m, sheet) => ok(entityIntersectsSheet({ ...st, ...e }, sheet) === true, m);
+  const no = (e, m, sheet) => ok(entityIntersectsSheet({ ...st, ...e }, sheet) === false, m);
+  // Circunferencias que cruzan cada borde, y una que rodea la hoja sin tocarla.
+  yes({ type: 'circle', c: { x: 105, y: 20 }, r: 30 }, 'circunferencia que cruza el borde superior');
+  yes({ type: 'circle', c: { x: 5, y: 100 }, r: 6 }, 'circunferencia que cruza el borde izquierdo');
+  yes({ type: 'circle', c: { x: 205, y: 100 }, r: 20 }, 'circunferencia que cruza el borde derecho');
+  yes({ type: 'circle', c: { x: 105, y: 290 }, r: 15 }, 'circunferencia que cruza el borde inferior');
+  yes({ type: 'circle', c: { x: -10, y: -10 }, r: 20 }, 'circunferencia con el centro fuera que entra por la esquina');
+  no({ type: 'circle', c: { x: 105, y: 148.5 }, r: 500 }, 'circunferencia que rodea toda la hoja: nada dentro');
+  no({ type: 'circle', c: { x: 105, y: -30 }, r: 30 }, 'circunferencia tangente al borde: no cuenta');
+  no({ type: 'circle', c: { x: 400, y: 100 }, r: 50 }, 'circunferencia totalmente fuera');
+  // Arcos: lo que cuenta es su barrido, no el resto de su circunferencia.
+  yes({ type: 'arc', c: { x: 105, y: 20 }, r: 30, start: 20, sweep: 60 }, 'arco que cruza el borde superior');
+  yes({ type: 'arc', c: { x: 105, y: 20 }, r: 30, start: 180, sweep: 180 }, 'arco inferior dentro');
+  no({ type: 'arc', c: { x: 105, y: 20 }, r: 30, start: 50, sweep: 80 }, 'arco cuyo barrido queda fuera aunque su circunferencia entre');
+  yes({ type: 'arc', c: { x: 105, y: 20 }, r: 30, start: 340, sweep: 60 }, 'arco que pasa por 0°');
+  // Segmentos.
+  yes({ type: 'segment', a: { x: -20, y: 50 }, b: { x: 20, y: 50 } }, 'segmento que cruza el borde izquierdo');
+  yes({ type: 'segment', a: { x: -20, y: -20 }, b: { x: 230, y: 317 } }, 'diagonal con ambos extremos fuera que atraviesa la hoja');
+  no({ type: 'segment', a: { x: -20, y: -5 }, b: { x: 230, y: -5 } }, 'segmento paralelo fuera de la hoja');
+  no({ type: 'segment', a: { x: -10, y: 10 }, b: { x: 10, y: -10 } }, 'segmento que solo toca la esquina');
+  yes({ type: 'segment', a: { x: 10, y: 0 }, b: { x: 50, y: 0 } }, 'segmento sobre el borde (hoja cerrada)');
+  // Orientación: la misma figura según la hoja.
+  yes({ type: 'segment', a: { x: 250, y: 20 }, b: { x: 280, y: 20 } }, 'en horizontal está dentro', L);
+  no({ type: 'segment', a: { x: 250, y: 20 }, b: { x: 280, y: 20 } }, 'en vertical queda fuera');
+  // Comparación con un muestreo denso de la curva (referencia independiente).
+  const inside = (p) => p.x >= 0 && p.x <= 210 && p.y >= 0 && p.y <= 297;
+  let seed2 = 777; // generador propio: no altera la secuencia de las demás pruebas aleatorias
+  const rnd = () => { seed2 = (seed2 * 1103515245 + 12345) % 2147483648; return seed2 / 2147483648; };
+  let agree = 0;
+  for (let k = 0; k < 400; k += 1) {
+    const e = { ...st, type: 'arc', c: { x: -40 + rnd() * 290, y: -40 + rnd() * 377 }, r: 1 + rnd() * 120, start: rnd() * 360, sweep: 1 + rnd() * 358 };
+    let sampled = false;
+    for (let i = 1; i < 4000 && !sampled; i += 1) sampled = inside(pointAt(e.c, e.start + e.sweep * i / 4000, e.r));
+    const exact = entityIntersectsSheet(e);
+    // El muestreo solo puede perderse tramos más cortos que su paso: en ese caso la exacta debe decir que sí.
+    ok(exact === sampled || (exact && !sampled), `arco aleatorio ${k}: exacta ${exact}, muestreo ${sampled}`);
+    if (exact === sampled) agree += 1;
+  }
+  ok(agree >= 396, `coincidencia con el muestreo (${agree}/400)`);
+  // La comprobación no toca la entidad.
+  const c0 = { ...st, type: 'circle', c: { x: 105, y: 20 }, r: 30 };
+  const copy = JSON.stringify(c0); entityIntersectsSheet(c0); ok(JSON.stringify(c0) === copy, 'no modifica la geometría');
 }
 
 // ───────── 3) Historial ─────────

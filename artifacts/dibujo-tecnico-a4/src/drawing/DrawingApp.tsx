@@ -9,7 +9,7 @@ import {
   type Orientation, type Sheet,
 } from '@/lib/geometry.js';
 import {
-  commitHistory, createHistory, entityInsideSheet, hitTest, makeId, pointInsideSheet,
+  commitHistory, createHistory, entityInsideSheet, entityIntersectsSheet, hitTest, makeId, pointInsideSheet,
   redoHistory, removeEntities, sanitizeEntity, undoHistory, updateEntity,
   type Entity, type EntityPatch, type History, type Margins, type Pt,
 } from '@/lib/document.js';
@@ -59,6 +59,8 @@ type Gesture = {
 };
 
 const PREFS_KEY = 'dibujo-tecnico-a4-prefs-v2';
+const OUTSIDE_SHEET = 'Queda totalmente fuera de la hoja A4. Ajusta los valores.';
+const PARTLY_OUTSIDE = 'Creado. Una parte queda fuera de la hoja: se conserva, pero no se muestra ni se exporta.';
 const CALIB_KEY = 'dibujo-tecnico-a4-calibracion';
 const CAL_MM = 100;
 const HIT_PX = 12;
@@ -423,19 +425,23 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   }, [undo, redo, resetConstruction, selectedId, deleteIds]);
 
   // ── Creación de entidades ──
-  /** Crea entidades con el estilo actual. Las coordenadas se guardan exactamente como llegan. */
+  /**
+   * Crea entidades con el estilo actual. Las coordenadas se guardan exactamente como llegan.
+   * Se rechaza lo que queda totalmente fuera de la hoja; si solo una parte queda fuera, se crea completo y se avisa
+   * (la pantalla y las exportaciones muestran únicamente la parte del A4).
+   */
   const createEntities = (drafts: Draft[]): string | null => {
     const made: Entity[] = [];
     for (const draft of drafts) {
       const e = sanitizeEntity({ ...draft, id: makeId(), color: meta.color, width: meta.width });
       if (!e) return 'Valores no válidos.';
-      if (e.type !== 'polyline' && !entityInsideSheet(e, 1e-9, sheet)) return 'Queda fuera de la hoja A4. Ajusta los valores.';
+      if (e.type !== 'polyline' && !entityIntersectsSheet(e, sheet)) return OUTSIDE_SHEET;
       made.push(e);
     }
     if (!made.length) return null;
     commit([...entitiesRef.current, ...made]);
     if (made.length === 1 && made[0].type !== 'polyline') setLastCreatedId(made[0].id);
-    setNotice('');
+    setNotice(made.some(e => e.type !== 'polyline' && !entityInsideSheet(e, 1e-9, sheet)) ? PARTLY_OUTSIDE : '');
     return null;
   };
   const tryCreate = (drafts: Draft[]) => { const error = createEntities(drafts); if (error) setNotice(error); return !error; };
@@ -1232,7 +1238,7 @@ function withSheetCheck(a: Draft[] | Sheet, b?: Draft[] | Sheet): Pending {
   for (const d of list) {
     const e = sanitizeEntity({ ...d, id: 'tmp', color: '#000000', width: 0.45 });
     if (!e) return { entities: list, error: 'Valores no válidos.' };
-    if (!entityInsideSheet(e, 1e-9, sheet)) return { entities: list, error: 'Queda fuera de la hoja A4. Ajusta los valores.' };
+    if (!entityIntersectsSheet(e, sheet)) return { entities: list, error: OUTSIDE_SHEET };
   }
   return { entities: list };
 }
