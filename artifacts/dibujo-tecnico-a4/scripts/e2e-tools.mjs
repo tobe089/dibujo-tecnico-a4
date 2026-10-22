@@ -139,7 +139,11 @@ const upDoc = clientToDoc(vC, ups);
 near(s3.b.x, upDoc.x, 1e-9, 'arrastre: final exacto x'); near(s3.b.y, upDoc.y, 1e-9, 'arrastre: final exacto y');
 log('regla por arrastre: final = punto donde se levanta el lápiz');
 
-// ───────── 2) Compás: centro y radio = puntos tocados (sin imán al extremo cercano) ─────────
+// ───────── 2) Compás: definir la guía no crea nada; centro y radio = puntos tocados (sin imán al extremo cercano) ─────────
+const guide = () => page.evaluate(() => {
+  const g = document.querySelector('[data-testid=compass-guide]');
+  return g ? { cx: Number(g.dataset.cx), cy: Number(g.dataset.cy), r: Number(g.dataset.r), rotation: Number(g.dataset.rotation) } : null;
+});
 await page.click('[data-testid=tool-compass]');
 const cTarget = { x: ents[0].a.x + 3, y: ents[0].a.y + 1.5 }; // a 3,4 mm de un extremo existente
 await penTap(cTarget.x, cTarget.y);
@@ -147,18 +151,27 @@ const vD = await view(); const cDoc = clientToDoc(vD, await lastDown());
 const rTarget = { x: cTarget.x + 30 * Math.cos(20 * Math.PI / 180), y: cTarget.y - 30 * Math.sin(20 * Math.PI / 180) };
 await penTap(rTarget.x, rTarget.y);
 const rDoc = clientToDoc(vD, await lastDown());
+const nBefore = ents.length;
+ents = await entities();
+ok(ents.length === nBefore, 'definir el compás con dos toques NO crea ninguna figura');
+const g2 = await guide();
+ok(g2 && g2.cx === cDoc.x && g2.cy === cDoc.y, 'guía: centro = primer toque exacto');
+ok(Math.hypot(g2.cx - ents[0].a.x, g2.cy - ents[0].a.y) > 3, 'el centro NO salta al extremo cercano');
+near(g2.r, Math.hypot(rDoc.x - cDoc.x, rDoc.y - cDoc.y), 1e-12, 'guía: radio = distancia exacta entre toques');
+near(g2.r, 30, 1.5 / vD.scale, 'radio ≈ 30 mm según los toques');
+// Circunferencia exacta con «Crear con estos valores» (acción explícita): usa el radio exacto, no el redondeado del campo.
+await page.click('[data-testid=button-place-line]');
 ents = await entities();
 const circ = ents.at(-1);
-ok(circ.type === 'circle', 'el compás crea una circunferencia');
-near(circ.c.x, cDoc.x, 1e-9, 'centro = toque (x)'); near(circ.c.y, cDoc.y, 1e-9, 'centro = toque (y)');
-ok(Math.hypot(circ.c.x - ents[0].a.x, circ.c.y - ents[0].a.y) > 3, 'el centro NO salta al extremo cercano');
-near(circ.r, Math.hypot(rDoc.x - cDoc.x, rDoc.y - cDoc.y), 1e-9, 'radio = distancia exacta entre toques');
-near(circ.r, 30, 1.5 / vD.scale, 'radio ≈ 30 mm según los toques');
-log(`compás por toques: centro exacto, r = ${circ.r.toFixed(4)} mm`);
+ok(circ.type === 'circle' && circ.c.x === g2.cx && circ.c.y === g2.cy && circ.r === g2.r, 'Crear con estos valores: circunferencia con el centro y el radio exactos de la guía');
+log(`compás: dos toques definen la guía sin dibujar; «Crear con estos valores» → r = ${circ.r.toFixed(4)} mm exacto`);
 
-// Arco en tres toques, antihorario de 0° a 90°.
+// Arco por valores, antihorario de 0° a 90°, con el centro y el radio marcados con toques.
+await page.click('[data-testid=button-compass-relocate]');
+await penTap(150, 60); await penTap(170, 60);
 await page.click('[data-testid=toggle-compass-full]');
-await penTap(150, 60); await penTap(170, 60); await penTap(150, 30);
+await page.fill('[data-testid=input-compass-start]', '0'); await page.fill('[data-testid=input-compass-end]', '90');
+await page.click('[data-testid=button-place-line]');
 ents = await entities();
 const arc = ents.at(-1);
 ok(arc.type === 'arc', 'arco creado');
@@ -167,7 +180,8 @@ near(arc.start, 0, 0.2, 'inicio del arco ≈ 0°'); near(arc.sweep, 90, 0.2, 'ba
 const mid = await page.evaluate((id) => { const p = document.querySelector(`[data-testid="entity-${id}"]`); const L = p.getTotalLength(); const q = p.getPointAtLength(L / 2); return { x: q.x, y: q.y }; }, arc.id);
 const expMid = { x: arc.c.x + arc.r * Math.cos((arc.start + arc.sweep / 2) * Math.PI / 180), y: arc.c.y - arc.r * Math.sin((arc.start + arc.sweep / 2) * Math.PI / 180) };
 near(Math.hypot(mid.x - expMid.x, mid.y - expMid.y), 0, 0.01, 'el arco SVG pasa por su punto medio teórico');
-log('compás en modo arco: tres toques, sentido antihorario correcto en pantalla');
+await page.click('[data-testid=toggle-compass-full]');
+log('compás: arco exacto por valores, sentido antihorario correcto en pantalla');
 
 // ───────── 3) Borrador parcial ─────────
 await page.click('[data-testid=tool-eraser]');
@@ -686,6 +700,85 @@ async function systemCancel() {
   list = await entities();
   ok(list.length === 1 && list[0].r === 32.5 && list[0].c.y === 20, 'editar el radio de la figura que cruza el borde se acepta con el valor exacto');
   log('límites A4: parte real dentro → se crea entera y se recorta al mostrar y exportar; totalmente fuera → se rechaza');
+}
+
+// ───────── 18) Compás como guía persistente: definirlo nunca crea geometría ─────────
+{
+  await fresh();
+  const guideNow = () => page.evaluate(() => {
+    const g = document.querySelector('[data-testid=compass-guide]');
+    return g ? { cx: Number(g.dataset.cx), cy: Number(g.dataset.cy), r: Number(g.dataset.r), rotation: Number(g.dataset.rotation) } : null;
+  });
+  const status = () => page.locator('[data-testid=status-compass] b').innerText();
+  await page.click('[data-testid=tool-compass]');
+  // Arrastre del centro a un punto de la circunferencia: define la guía.
+  await penDrag({ x: 60.3, y: 100.7 }, { x: 95.9, y: 120.2 });
+  const v = await view();
+  const down = clientToDoc(v, await lastDown());
+  const up = clientToDoc(v, await page.evaluate(() => window.__ups.at(-1)));
+  let gd = await guideNow();
+  ok((await entities()).length === 0, 'arrastre: no se crea ninguna figura');
+  ok(gd && gd.cx === down.x && gd.cy === down.y, 'arrastre: centro = punto de apoyo exacto');
+  near(gd.r, Math.hypot(up.x - down.x, up.y - down.y), 1e-12, 'arrastre: radio = distancia exacta al punto de levantado');
+  ok((await status()).includes('03'), 'el compás queda listo');
+  ok((await page.locator('[data-testid=button-undo]').isDisabled()), 'definir el compás no entra en el historial');
+  // Con el compás listo, los toques no lo mueven.
+  await penTap(150, 200);
+  ok(JSON.stringify(await guideNow()) === JSON.stringify(gd) && (await entities()).length === 0, 'un toque no mueve la guía ni crea nada');
+  ok((await page.locator('[data-testid=text-notice]').innerText()).includes('Recolocar'), 'se indica cómo recolocarlo');
+  // El radio escrito cambia la guía (exacto, con coma decimal) y sigue sin crear nada.
+  await page.fill('[data-testid=input-compass-radius]', '37,5');
+  gd = await guideNow();
+  ok(gd.r === 37.5 && gd.cx === down.x && (await entities()).length === 0, 'radio escrito 37,5 → guía r = 37,5 mm; centro intacto; nada creado');
+  // Centro por coordenadas + «Fijar radio».
+  await page.click('[data-testid=button-compass-relocate]');
+  ok(await guideNow() === null && (await status()).includes('01'), 'Recolocar quita la guía');
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '148.5');
+  await page.click('[data-testid=button-compass-fix-center]');
+  ok((await status()).includes('02') && await guideNow() === null, 'centro fijado: falta el radio, todavía sin guía');
+  await page.fill('[data-testid=input-compass-radius]', '25.25');
+  await page.click('[data-testid=button-compass-fix-radius]');
+  gd = await guideNow();
+  ok(gd && gd.cx === 105 && gd.cy === 148.5 && gd.r === 25.25 && (await entities()).length === 0, 'Fijar radio: guía (105; 148,5) r = 25,25 sin crear nada');
+  // Persiste al cambiar de herramienta (y se ve con cualquier herramienta).
+  for (const t of ['tool-pen', 'tool-ruler', 'tool-eraser', 'tool-select']) await page.click(`[data-testid=${t}]`);
+  ok(JSON.stringify(await guideNow()) === JSON.stringify(gd), 'la guía sigue visible e idéntica con otras herramientas');
+  // Un centro marcado a falta del radio sí se descarta al cambiar de herramienta.
+  await page.click('[data-testid=tool-compass]');
+  await page.click('[data-testid=button-compass-relocate]');
+  await penTap(40, 40);
+  ok((await status()).includes('02'), 'centro marcado');
+  await page.click('[data-testid=tool-pen]'); await page.click('[data-testid=tool-compass]');
+  ok((await status()).includes('01'), 'al cambiar de herramienta se descarta el centro a medias');
+  await page.fill('[data-testid=input-compass-x]', '105'); await page.fill('[data-testid=input-compass-y]', '148.5');
+  await page.click('[data-testid=button-compass-fix-center]');
+  await page.fill('[data-testid=input-compass-radius]', '25.25'); await page.click('[data-testid=button-compass-fix-radius]');
+  // Ocultar y mostrar.
+  await page.click('[data-testid=button-toggle-compass]');
+  ok(await guideNow() === null, 'ocultar: la guía deja de verse');
+  await waitSaved();
+  let saved = (await readProject()).instruments.compass;
+  ok(saved.visible === false && saved.pose.x === 105 && saved.pose.y === 148.5 && saved.radius === 25.25, 'oculto: la configuración se guarda intacta');
+  await page.click('[data-testid=button-toggle-compass]');
+  ok(JSON.stringify(await guideNow()) === JSON.stringify(gd), 'mostrar: vuelve igual');
+  // La guía no se exporta: en el PNG, un punto de la guía queda en blanco o con la cuadrícula, nunca con su color.
+  await page.click('[data-testid=button-export]');
+  const [pngDl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=button-export-png]')]);
+  const onGuide = { x: 105 + 25.25 * Math.cos(Math.PI / 7), y: 148.5 - 25.25 * Math.sin(Math.PI / 7) };
+  const pixel = await page.evaluate(async ({ b64, p }) => {
+    const bmp = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+    const cv = new OffscreenCanvas(bmp.width, bmp.height); const cx = cv.getContext('2d'); cx.drawImage(bmp, 0, 0);
+    return [...cx.getImageData(Math.round(p.x / 25.4 * 300), Math.round(p.y / 25.4 * 300), 1, 1).data];
+  }, { b64: fs.readFileSync(await pngDl.path()).toString('base64'), p: onGuide });
+  ok(pixel[0] > 150, `la guía no aparece en el PNG (${pixel})`);
+  // Se guarda y se restaura al reabrir y al recargar.
+  await waitSaved();
+  saved = (await readProject()).instruments.compass;
+  ok(saved.visible === true && saved.radius === 25.25 && saved.pose.x === 105, 'visible: guardado');
+  await reloadAndReopen();
+  ok(JSON.stringify(await guideNow()) === JSON.stringify(gd), 'recargar la página restaura la guía');
+  ok((await entities()).length === 0, 'y el documento sigue sin figuras');
+  log('compás: guía por toques, arrastre o valores; nunca crea figuras; persiste, se oculta, no se exporta y se restaura');
 }
 
 ok(pageErrors.length === 0, `errores de página: ${pageErrors.join(' | ')}`);

@@ -14,7 +14,7 @@ import {
   type Entity, type EntityPatch, type History, type Margins, type Pt,
 } from '@/lib/document.js';
 import { createProject, entitiesOutsideSheet, filterSelection, projectToJson, type Project } from '@/lib/project.js';
-import { PROTRACTOR_DEFAULTS, type ProtractorState } from '@/lib/instruments.js';
+import { COMPASS_MAX_RADIUS, PROTRACTOR_DEFAULTS, type CompassState, type Pose, type ProtractorState } from '@/lib/instruments.js';
 import type { Store } from '@/lib/storage.js';
 import { createSaveManager, type SaveManager, type SaveStatus } from '@/lib/save-manager.js';
 import { clearJournal, writeJournal } from '@/lib/journal.js';
@@ -147,12 +147,20 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   const [ruleAngle, setRuleAngle] = useState('0');
   const [ruleX, setRuleX] = useState('');
   const [ruleY, setRuleY] = useState('');
-  // Compás
-  const [compCenter, setCompCenter] = useState<Pt | null>(null);
-  const [compArcStart, setCompArcStart] = useState<{ r: number; start: number } | null>(null);
+  // Compás: guía de trazado persistente (instruments.compass). Definirlo NUNCA crea geometría.
+  // compPose = centro y dirección del último radio definido (guía lista); compPending = centro marcado a falta del
+  // radio (construcción a medias: no se guarda y se descarta al cambiar de herramienta).
+  const savedComp = project.instruments.compass;
+  const [compVisible, setCompVisible] = useState(savedComp.visible);
+  const [compPose, setCompPose] = useState<Pose | null>(savedComp.pose);
+  const [compPending, setCompPending] = useState<Pt | null>(null);
+  /** Radio exacto (mm). El campo muestra 3 decimales, pero solo lo sustituye si se escribe en él. */
+  const [compRadius, setCompRadius] = useState(savedComp.radius);
+  const [compRadiusText, setCompRadiusText] = useState<string | null>(null);
+  const [compTrace, setCompTrace] = useState(savedComp.trace);
+  // «Crear con estos valores»: circunferencia o arco exactos (acción explícita).
   const [compFull, setCompFull] = useState(true);
   const [compCw, setCompCw] = useState(false);
-  const [compRadius, setCompRadius] = useState('30');
   const [compStart, setCompStart] = useState('0');
   const [compEnd, setCompEnd] = useState('90');
   const [compX, setCompX] = useState('');
@@ -247,8 +255,15 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
       cw: protCw, baseRay: protBaseRay, mark: protMark,
     };
   }, [protVisible, protVertex, protBase, protAngle, protLen, protCw, protBaseRay, protMark]);
-  const latest = useRef({ entities, meta, orientation, selectedId, protractor });
-  latest.current = { entities, meta, orientation, selectedId, protractor };
+  const compRadiusTyped = compRadiusText === null ? compRadius : toNum(compRadiusText);
+  const compRadiusValid = compRadiusTyped > 0 && compRadiusTyped <= COMPASS_MAX_RADIUS;
+  /** Radio de la guía: el escrito si es válido; si no, el último válido. */
+  const compR = compRadiusValid ? compRadiusTyped : compRadius;
+  const compass = useMemo((): CompassState => ({
+    visible: compVisible, pose: compPose ? { ...compPose } : null, radius: compR, trace: compTrace,
+  }), [compVisible, compPose, compR, compTrace]);
+  const latest = useRef({ entities, meta, orientation, selectedId, protractor, compass });
+  latest.current = { entities, meta, orientation, selectedId, protractor, compass };
   const snapshot = useCallback((): Project => {
     const cur = latest.current;
     const v = viewRef.current;
@@ -263,7 +278,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
       sheet: { ...project.sheet, orientation: cur.orientation, margins: cur.meta.margins },
       style: { color: cur.meta.color, width: cur.meta.width },
       view: savedView, selection: cur.selectedId ? filterSelection([cur.selectedId], cur.entities) : [],
-      instruments: { ...project.instruments, protractor: cur.protractor },
+      instruments: { ...project.instruments, protractor: cur.protractor, compass: cur.compass },
     };
   }, [project]);
   const managerRef = useRef<SaveManager | null>(null);
@@ -291,7 +306,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   useEffect(() => {
     if (firstChange.current) { firstChange.current = false; return; }
     managerRef.current?.changed();
-  }, [entities, meta, orientation, selectedId, protractor]);
+  }, [entities, meta, orientation, selectedId, protractor, compass]);
   // La vista (centro y zoom) no es geometría: no marca cambios, pero se guarda al salir si cambió.
   const lastSavedView = useRef(JSON.stringify(project.view));
   // Otras pestañas: si guardan este proyecto, se recarga (sin cambios aquí) o se marca el conflicto (con cambios).
@@ -332,6 +347,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     setMeta({ margins: fresh.sheet.margins, color: fresh.style.color, width: fresh.style.width });
     setOrientation(fresh.sheet.orientation);
     applyProtractor(fresh.instruments.protractor);
+    applyCompass(fresh.instruments.compass);
     setSelectedId(null); setLastCreatedId(null);
     firstChange.current = true;
     managerRef.current?.resetClean();
@@ -344,6 +360,18 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     setProtAngle(String(p.angle)); setProtLen(String(p.rayLength));
     setProtCw(p.cw); setProtBaseRay(p.baseRay); setProtMark(p.mark);
   }
+  function applyCompass(c: CompassState) {
+    setCompVisible(c.visible); setCompPose(c.pose); setCompPending(null);
+    setCompRadius(c.radius); setCompRadiusText(null); setCompTrace(c.trace);
+  }
+  /** Fija la guía del compás (centro, radio exacto y dirección del radio). No crea ninguna figura. */
+  const defineCompass = (c: Pt, r: number, rotation: number) => {
+    if (!(r > 0 && r <= COMPASS_MAX_RADIUS)) { setNotice(`Radio no válido (0–${COMPASS_MAX_RADIUS} mm).`); return; }
+    setCompPose({ x: c.x, y: c.y, rotation });
+    setCompRadius(r); setCompRadiusText(null);
+    setCompPending(null); setCompVisible(true);
+    setNotice('');
+  };
   const saveNow = async () => { await managerRef.current?.flush(); void refreshThumbnail(); };
   const refreshThumbnail = async () => {
     try { await store.setThumbnail(project.id, await makeThumbnail(latest.current.entities, sheetFor(latest.current.orientation))); } catch { /* la miniatura no es crítica */ }
@@ -363,6 +391,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     copy.sheet.margins = latest.current.meta.margins;
     copy.style = { color: latest.current.meta.color, width: latest.current.meta.width };
     copy.instruments = { ...copy.instruments, protractor: latest.current.protractor };
+    copy.instruments = { ...copy.instruments, compass: latest.current.compass };
     try {
       await store.create(copy, { thumbnail: await makeThumbnail(copy.entities, sheetFor(copy.sheet.orientation)).catch(() => null) });
       managerRef.current?.resetClean();
@@ -393,7 +422,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
   const cancelGesture = useCallback(() => { gestureRef.current = null; setTick(t => t + 1); }, []);
   const resetConstruction = useCallback(() => {
     setRuleStart(null);
-    setCompCenter(null); setCompArcStart(null);
+    setCompPending(null); // el compás ya definido se conserva; solo se descarta un centro a falta del radio
     setRelRef(null); setRelPoint(null);
     setNotice('');
     cancelGesture();
@@ -402,6 +431,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     resetConstruction(); setTool(next); setLastCreatedId(null); setEditError(null);
     if (next !== 'select') setSelectedId(null);
     if (next === 'protractor') setProtVisible(true); // al activar el instrumento se presenta sobre la hoja
+    if (next === 'compass') setCompVisible(true);
   };
 
   const deleteIds = useCallback((ids: string[]) => {
@@ -549,24 +579,17 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
         break;
       }
       case 'compass': {
-        if (!compCenter) {
-          if (outside(tap)) break;
-          if (g.moved) {
-            const r = segmentLength(tap, end);
-            if (!(r > 0)) break;
-            if (compFull) tryCreate([{ type: 'circle', c: pt(tap), r } as Draft]);
-            else { setCompCenter(pt(tap)); setCompArcStart({ r, start: segmentAngle(tap, end) }); }
-          } else { setCompCenter(pt(tap)); setCompArcStart(null); setNotice(''); }
-        } else if (!compArcStart) {
-          const r = segmentLength(compCenter, end);
-          if (!(r > 0)) break;
-          if (compFull) { if (tryCreate([{ type: 'circle', c: compCenter, r } as Draft])) setCompCenter(null); }
-          else setCompArcStart({ r, start: segmentAngle(compCenter, end) });
-        } else {
-          if (segmentLength(compCenter, end) === 0) break;
-          const created = tryCreate([arcDraft(compCenter, compArcStart.r, compArcStart.start, segmentAngle(compCenter, end), compCw)]);
-          if (created) { setCompCenter(null); setCompArcStart(null); }
+        // Definir el compás (dos toques o un arrastre del centro al radio) solo configura la guía: no crea figuras.
+        if (compPose) {
+          // Ya definido: los toques no lo mueven (se recoloca a propósito con «Recolocar compás»).
+          setNotice('El compás ya está definido. Para moverlo, pulsa «Recolocar compás».');
+          break;
         }
+        if (!compPending) {
+          if (outside(tap)) break;
+          if (g.moved) { if (segmentLength(tap, end) > 0) defineCompass(pt(tap), segmentLength(tap, end), segmentAngle(tap, end)); }
+          else { setCompPending(pt(tap)); setNotice(''); }
+        } else if (segmentLength(compPending, end) > 0) defineCompass(compPending, segmentLength(compPending, end), segmentAngle(compPending, end));
         break;
       }
       case 'protractor':
@@ -720,9 +743,11 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     if (!(length > 0 && length <= 500) || !Number.isFinite(angle)) return { entities: [], error: 'Longitud (0–500 mm) o ángulo no válidos.' };
     return withSheetCheck(sheet, [{ type: 'segment', a: ruleStart, b: pointAt(ruleStart, angle, length) } as Draft]);
   })();
+  /** Centro para «Crear con estos valores»: el de la guía o el recién marcado. */
+  const compCenter: Pt | null = compPose ? { x: compPose.x, y: compPose.y } : compPending;
   const compNumeric: Pending | null = (() => {
     if (tool !== 'compass' || !compCenter) return null;
-    const r = toNum(compRadius);
+    const r = compRadiusTyped;
     if (!(r > 0 && r <= 500)) return { entities: [], error: 'Radio no válido (0–500 mm).' };
     if (compFull) return withSheetCheck(sheet, [{ type: 'circle', c: compCenter, r } as Draft]);
     const start = toNum(compStart), endA = toNum(compEnd);
@@ -747,13 +772,11 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
       return { entity: { type: 'segment', a, b } as Draft, label: `${fmtNum(segmentLength(a, b))} mm · ${fmtNum(segmentAngle(a, b))}°` };
     }
     if (tool === 'compass') {
-      const c = compCenter ?? (g && g.tool === 'compass' && g.moved ? g.startDoc : null);
-      const q = compCenter ? pointerDoc : g && g.tool === 'compass' && g.moved ? g.curDoc : null;
+      // Vista previa del radio mientras se define la guía (no es geometría).
+      if (compPose) return null;
+      const c = compPending ?? (g && g.tool === 'compass' && g.moved ? g.startDoc : null);
+      const q = compPending ? pointerDoc : g && g.tool === 'compass' && g.moved ? g.curDoc : null;
       if (!c || !q || segmentLength(c, q) === 0) return null;
-      if (compArcStart && compCenter) {
-        const endA = segmentAngle(compCenter, q);
-        return { entity: arcDraft(compCenter, compArcStart.r, compArcStart.start, endA, compCw), label: `r ${fmtNum(compArcStart.r)} mm · final ${fmtNum(endA)}°` };
-      }
       const r = segmentLength(c, q);
       return { entity: { type: 'circle', c, r } as Draft, label: `r ${fmtNum(r)} mm · ${fmtNum(segmentAngle(c, q))}°` };
     }
@@ -891,6 +914,21 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
     </g>;
   }, [protVisible, protVertex, protBase, protCw, protAngle]);
 
+  // Guía del compás: trazo discontinuo de instrumento, fuera de la geometría (no se exporta ni se borra).
+  const compassGuide = useMemo(() => {
+    if (!compVisible || !compPose) return null;
+    const c = { x: compPose.x, y: compPose.y };
+    const tip = pointAt(c, compPose.rotation, compR);
+    const mid = pointAt(c, compPose.rotation, compR / 2);
+    return <g pointerEvents="none" data-testid="compass-guide" data-cx={c.x} data-cy={c.y} data-r={compR} data-rotation={compPose.rotation}>
+      <circle cx={c.x} cy={c.y} r={compR} fill="none" stroke="#2f7f8f" strokeWidth={1.3 * px} strokeDasharray={`${5 * px} ${4 * px}`} strokeOpacity=".9" />
+      <line x1={c.x} y1={c.y} x2={tip.x} y2={tip.y} stroke="#2f7f8f" strokeWidth={px} strokeOpacity=".8" />
+      <line x1={c.x - 6 * px} y1={c.y} x2={c.x + 6 * px} y2={c.y} stroke="#2f7f8f" strokeWidth={1.3 * px} />
+      <line x1={c.x} y1={c.y - 6 * px} x2={c.x} y2={c.y + 6 * px} stroke="#2f7f8f" strokeWidth={1.3 * px} />
+      <text x={mid.x} y={mid.y - 4 * px} fontSize={11 * px} textAnchor="middle" fill="#2f7f8f">r {fmtNum(compR)} mm</text>
+    </g>;
+  }, [compVisible, compPose, compR, px]);
+
   // ── Paneles ──
   const errorLine = (p: Pending | null) => (p?.error ? <div className="notice" data-testid="text-construction-error">{p.error}</div> : null);
   const createRow = (p: Pending | null, onCreate: () => void, label = 'Crear', onReset: () => void = resetConstruction) => <div className="create-row">
@@ -984,28 +1022,35 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
           </section>}
 
           {tool === 'compass' && <section className="panel-section">
-            <div className="section-head">Compás · centro y radio</div>
+            <div className="section-head">Compás · guía de trazado</div>
             <div className="rule-box" data-testid="status-compass">
-              <b>{!compCenter ? '01 / Marca el centro' : !compArcStart ? '02 / Marca el radio' : '03 / Marca el final del arco'}</b>
-              {!compCenter ? 'Toca el centro, o arrastra del centro a un punto de la circunferencia.' : !compArcStart ? (compFull ? 'Toca un punto de la circunferencia: el radio es la distancia exacta al centro.' : 'Toca el punto donde empieza el arco: fija el radio y el ángulo inicial.') : 'Toca hacia dónde termina el arco (solo cuenta la dirección).'}
-              <Toggle checked={compFull} onChange={value => { setCompFull(value); setCompArcStart(null); }} label="Circunferencia completa" testid="toggle-compass-full" />
-              {!compFull && <Seg value={compCw ? 'cw' : 'ccw'} onChange={value => setCompCw(value === 'cw')} testid="seg-compass-dir" options={[{ value: 'ccw', label: '↺ Antihorario' }, { value: 'cw', label: '↻ Horario' }]} />}
+              <b>{compPose ? '03 / Compás listo' : compPending ? '02 / Marca el radio' : '01 / Marca el centro'}</b>
+              {compPose ? 'La guía no forma parte del dibujo. Para moverla, pulsa «Recolocar compás».'
+                : compPending ? 'Toca un punto: el radio es la distancia exacta al centro. También puedes escribirlo y pulsar «Fijar radio».'
+                  : 'Toca el centro, o arrastra del centro a un punto de la circunferencia. Definir el compás no dibuja nada.'}
               {liveLine}{noticeLine}
-              {!compCenter ? <div className="field-stack">
+              {compPose && <Toggle checked={compVisible} onChange={setCompVisible} label="Mostrar compás" testid="toggle-compass-visible" />}
+              <div className="field-stack">
+                {compCenter && <div className="hint-small mono-line" data-testid="text-compass-center">Centro: ({fmtNum(compCenter.x)}, {fmtNum(compCenter.y)}) mm{compPose ? ` · r ${fmtNum(compR)} mm · Ø ${fmtNum(2 * compR)} mm` : ''}</div>}
                 <div className="field-pair">
                   <NumField label="Centro X" unit="mm" value={compX} onChange={setCompX} testid="input-compass-x" />
                   <NumField label="Centro Y" unit="mm" value={compY} onChange={setCompY} testid="input-compass-y" />
                 </div>
-                <button className="btn" onClick={() => fixStartFromFields(compX, compY, p => { setCompCenter(p); setCompArcStart(null); })} data-testid="button-compass-fix-center">Fijar centro por coordenadas</button>
-              </div> : <div className="field-stack">
-                <div className="hint-small mono-line" data-testid="text-compass-center">Centro: ({fmtNum(compCenter.x)}, {fmtNum(compCenter.y)}) mm{compArcStart ? ` · r ${fmtNum(compArcStart.r)} mm · inicio ${fmtNum(compArcStart.start)}°` : ''}</div>
-                <NumField label="Radio" unit="mm" value={compRadius} onChange={setCompRadius} testid="input-compass-radius" />
+                <button className="btn" onClick={() => fixStartFromFields(compX, compY, p => { if (compPose) setCompPose({ ...compPose, x: p.x, y: p.y }); else setCompPending(p); })} data-testid="button-compass-fix-center">Fijar centro por coordenadas</button>
+                {compCenter && <NumField label="Radio (apertura)" unit="mm" value={compRadiusText ?? fmtNum(compRadius)} onChange={setCompRadiusText} testid="input-compass-radius" />}
+                {compPending && !compPose && <button className="btn" onClick={() => defineCompass(compPending, compRadiusTyped, 0)} disabled={!compRadiusValid} data-testid="button-compass-fix-radius">Fijar radio</button>}
+                {compPose && <button className="btn" onClick={() => { setCompPose(null); setCompPending(null); setNotice(''); }} data-testid="button-compass-relocate">Recolocar compás</button>}
+              </div>
+              {compCenter && <div className="field-stack">
+                <div className="section-head">Crear con estos valores</div>
+                <Toggle checked={compFull} onChange={setCompFull} label="Circunferencia completa" testid="toggle-compass-full" />
+                {!compFull && <Seg value={compCw ? 'cw' : 'ccw'} onChange={value => setCompCw(value === 'cw')} testid="seg-compass-dir" options={[{ value: 'ccw', label: '↺ Antihorario' }, { value: 'cw', label: '↻ Horario' }]} />}
                 {!compFull && <div className="field-pair">
                   <NumField label="Ángulo inicial" unit="°" value={compStart} onChange={setCompStart} testid="input-compass-start" />
                   <NumField label="Ángulo final" unit="°" value={compEnd} onChange={setCompEnd} testid="input-compass-end" />
                 </div>}
                 {errorLine(compNumeric)}
-                {createRow(compNumeric, () => { if (compNumeric && tryCreate(compNumeric.entities)) { setCompCenter(null); setCompArcStart(null); } }, 'Crear con estos valores')}
+                {createRow(compNumeric, () => { if (compNumeric) tryCreate(compNumeric.entities); }, 'Crear con estos valores')}
               </div>}
             </div>
             {editor && <div className="section-head">Última figura · editable</div>}
@@ -1122,6 +1167,7 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
                 <button className="btn small" onClick={goRealScale} data-testid="button-real-scale" aria-label="Escala real 1:1">1:1</button>
                 <button className="btn small" onClick={() => { setCalMeasured(''); setModal('calibrate'); }} data-testid="button-calibrate">Calibrar</button>
               </>}
+              {compPose && <button className={`btn small ${compVisible ? 'active' : ''}`} onClick={() => setCompVisible(v => !v)} aria-pressed={compVisible} aria-label={compVisible ? 'Ocultar compás' : 'Mostrar compás'} data-testid="button-toggle-compass"><Compass size={14} /><span className="export-label">Compás</span></button>}
               {protVertex && <button className={`btn small ${protVisible ? 'active' : ''}`} onClick={() => setProtVisible(v => !v)} aria-pressed={protVisible} aria-label={protVisible ? 'Ocultar transportador' : 'Mostrar transportador'} data-testid="button-toggle-protractor"><Triangle size={14} /><span className="export-label">Transportador</span></button>}
               <button className="icon-btn" aria-label="Alejar" onClick={() => zoomCentered(1 / 1.25)} data-testid="button-zoom-out"><ZoomOut size={17} /></button>
               <span className="zoom-readout" data-testid="text-zoom">{Math.round(view.scale / fitScale * 100)}%</span>
@@ -1169,10 +1215,11 @@ export function DrawingApp({ store, project, onExit, onOpenProject }: {
               {protractorOverlay}
               {pending && !pending.error && pending.entities.map((d, i) => previewPath(d, `pending-${i}`))}
               {ruleNumeric && !ruleNumeric.error && !livePreview && ruleNumeric.entities.map((d, i) => previewPath(d, `rule-${i}`))}
-              {compNumeric && !compNumeric.error && !livePreview && compNumeric.entities.map((d, i) => previewPath(d, `comp-${i}`))}
+              {compassGuide}
+              {compNumeric && !compNumeric.error && !livePreview && !(compPose && compFull) && compNumeric.entities.map((d, i) => previewPath(d, `comp-${i}`))}
               {livePreview && previewPath(livePreview.entity, 'live-preview')}
               {tool === 'ruler' && ruleStart && marker(ruleStart, 'rs')}
-              {tool === 'compass' && compCenter && marker(compCenter, 'cc')}
+              {tool === 'compass' && compPending && marker(compPending, 'cc')}
               {tool === 'protractor' && protVertex && marker(protVertex, 'pv')}
               {(tool === 'parallel' || tool === 'perpendicular') && relPoint && marker(relPoint, 'rp')}
               {tool === 'point' && hover && <circle cx={hover.x} cy={hover.y} r={pointRadius({ width: meta.width })} fill="none" stroke="#cf6349" strokeWidth={px} pointerEvents="none" />}
